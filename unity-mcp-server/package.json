@@ -1,0 +1,64 @@
+{
+  "name": "unityvision-mcp",
+  "version": "1.1.0",
+  "description": "The most powerful AI bridge for Unity Editor - MCP server with 35 tools for scene manipulation, screenshots, code execution, and more",
+  "main": "dist/server.js",
+  "type": "module",
+  "bin": {
+    "unityvision-mcp": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/server.js",
+    "start:stdio": "node dist/server.js",
+    "cli": "node dist/cli.js",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
+    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
+    "test:integration": "UNITY_INTEGRATION_TESTS=1 node --experimental-vm-modules node_modules/jest/bin/jest.js --testPathPattern=integration"
+  },
+  "keywords": [
+    "mcp",
+    "unity",
+    "unity3d",
+    "game-development",
+    "ai",
+    "windsurf",
+    "claude",
+    "cursor",
+    "model-context-protocol",
+    "editor-tools"
+  ],
+  "author": "nicweberdev",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicweberdev/UnityVision.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nicweberdev/UnityVision/issues"
+  },
+  "homepage": "https://github.com/nicweberdev/UnityVision#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@jest/globals": "^29.7.0",
+    "@types/jest": "^29.5.11",
+    "@types/node": "^20.10.0",
+    "@types/ws": "^8.5.13",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.1",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE"
+  ]
+}

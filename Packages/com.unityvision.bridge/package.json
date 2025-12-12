@@ -1,0 +1,26 @@
+{
+  "name": "com.unityvision.bridge",
+  "version": "1.0.0",
+  "displayName": "UnityVision Bridge",
+  "description": "MCP bridge for AI-assisted Unity development with Windsurf",
+  "unity": "2021.3",
+  "unityRelease": "0f1",
+  "documentationUrl": "https://github.com/yourcompany/unity-vision",
+  "changelogUrl": "https://github.com/yourcompany/unity-vision/blob/main/CHANGELOG.md",
+  "licensesUrl": "https://github.com/yourcompany/unity-vision/blob/main/LICENSE",
+  "keywords": [
+    "mcp",
+    "ai",
+    "windsurf",
+    "bridge",
+    "automation"
+  ],
+  "author": {
+    "name": "UnityVision",
+    "email": "support@unityvision.dev",
+    "url": "https://unityvision.dev"
+  },
+  "dependencies": {
+    "com.unity.nuget.newtonsoft-json": "3.2.1"
+  }
+}
