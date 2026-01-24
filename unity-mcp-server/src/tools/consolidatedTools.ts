@@ -828,7 +828,16 @@ export const consolidatedToolDefinitions = [
   // 20. unity_code - Code execution
   {
     name: 'unity_code',
-    description: 'Execute C# code in Unity. Actions: execute (run code block), evaluate (evaluate expression)',
+    description: `Execute C# code in Unity. Actions: execute (run code block), evaluate (evaluate expression).
+
+⚠️ CRITICAL: Runs on Unity's main thread. AVOID blocking patterns:
+- EditorUtility.DisplayDialog() - modal dialogs hang indefinitely
+- AssetDatabase.Refresh() - can trigger long imports  
+- FindObjectsOfType<T>() on large scenes - very slow
+- while(true), for(;;) - infinite loops
+- Thread.Sleep(), .Wait(), .Result - blocking calls
+
+Will refuse to run if Unity is compiling. Keep Unity focused.`,
     inputSchema: {
       type: 'object' as const,
       properties: {

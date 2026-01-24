@@ -9,6 +9,8 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 using UnityVision.Editor.Bridge;
@@ -56,6 +58,46 @@ namespace UnityVision.Editor.Handlers
         #endregion
 
         private static StringBuilder _outputCapture;
+        
+        // Known patterns that can block the main thread
+        private static readonly string[] BlockingPatterns = new[]
+        {
+            "EditorUtility.DisplayDialog",
+            "EditorUtility.DisplayProgressBar",
+            "AssetDatabase.Refresh",
+            "AssetDatabase.ImportAsset",
+            "EditorSceneManager.SaveScene",
+            "while\\s*\\(\\s*true\\s*\\)",  // Infinite loop pattern
+            "for\\s*\\(\\s*;\\s*;\\s*\\)",  // Infinite for loop
+            "Thread.Sleep",
+            "Task.Delay",
+            ".Wait\\(",
+            ".Result",  // Blocking async result access
+        };
+        
+        /// <summary>
+        /// Check if Unity is currently compiling scripts
+        /// </summary>
+        private static bool IsCompiling()
+        {
+            return EditorApplication.isCompiling || EditorApplication.isUpdating;
+        }
+        
+        /// <summary>
+        /// Check if the code contains potentially blocking patterns
+        /// </summary>
+        private static string CheckForBlockingPatterns(string code)
+        {
+            foreach (var pattern in BlockingPatterns)
+            {
+                if (Regex.IsMatch(code, pattern, RegexOptions.IgnoreCase))
+                {
+                    return $"Code contains potentially blocking pattern: {pattern.Replace("\\", "")}. " +
+                           "This may cause the command to hang indefinitely.";
+                }
+            }
+            return null;
+        }
 
         public static RpcResponse ExecuteCode(RpcRequest request)
         {
@@ -65,16 +107,42 @@ namespace UnityVision.Editor.Handlers
             {
                 return RpcResponse.Failure("INVALID_PARAMS", "code is required");
             }
+            
+            // Check if Unity is compiling - this can cause hangs
+            if (IsCompiling())
+            {
+                return RpcResponse.Success(new ExecuteCodeResponse
+                {
+                    success = false,
+                    error = "Unity is currently compiling scripts. Please wait for compilation to finish before executing code.",
+                    executionTimeMs = 0
+                });
+            }
+            
+            var code = req.code.Trim();
+            
+            // Check for known blocking patterns and warn (but still execute)
+            var blockingWarning = CheckForBlockingPatterns(code);
 
             var startTime = DateTime.Now;
+            var timeoutMs = req.timeoutMs > 0 ? req.timeoutMs : 5000;
             _outputCapture = new StringBuilder();
+            
+            // Add warning to output if blocking pattern detected
+            if (!string.IsNullOrEmpty(blockingWarning))
+            {
+                _outputCapture.AppendLine($"[WARNING] {blockingWarning}");
+                FileLogger.Log("WARN", "CodeExecution", blockingWarning);
+            }
 
             try
             {
                 // Capture Debug.Log output
                 Application.logMessageReceived += CaptureLog;
+                
+                // Log that we're starting execution (helps diagnose hangs)
+                FileLogger.Log("INFO", "CodeExecution", $"Starting code execution (timeout: {timeoutMs}ms): {code.Substring(0, Math.Min(100, code.Length))}...");
 
-                var code = req.code.Trim();
                 object result = null;
 
                 // Try to evaluate as expression
@@ -83,6 +151,8 @@ namespace UnityVision.Editor.Handlers
                 Application.logMessageReceived -= CaptureLog;
 
                 var executionTime = (float)(DateTime.Now - startTime).TotalMilliseconds;
+                
+                FileLogger.Log("INFO", "CodeExecution", $"Code execution completed in {executionTime}ms");
 
                 return RpcResponse.Success(new ExecuteCodeResponse
                 {
@@ -96,13 +166,16 @@ namespace UnityVision.Editor.Handlers
             catch (Exception ex)
             {
                 Application.logMessageReceived -= CaptureLog;
+                
+                var executionTime = (float)(DateTime.Now - startTime).TotalMilliseconds;
+                FileLogger.Log("ERROR", "CodeExecution", $"Code execution failed after {executionTime}ms: {ex.Message}");
 
                 return RpcResponse.Success(new ExecuteCodeResponse
                 {
                     success = false,
                     error = ex.Message,
                     output = _outputCapture.ToString(),
-                    executionTimeMs = (float)(DateTime.Now - startTime).TotalMilliseconds
+                    executionTimeMs = executionTime
                 });
             }
         }

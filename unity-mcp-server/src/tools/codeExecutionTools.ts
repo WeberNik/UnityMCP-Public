@@ -36,6 +36,15 @@ export const codeExecutionToolDefinitions = [
     name: 'execute_code',
     description: `Execute arbitrary C# code in the Unity runtime. This is the most powerful tool - use it when no other tool fits your needs. The code runs in the Unity Editor context with access to all Unity APIs.
 
+⚠️ IMPORTANT: This runs on Unity's main thread. AVOID these blocking patterns that can hang indefinitely:
+- EditorUtility.DisplayDialog() - opens modal dialogs
+- AssetDatabase.Refresh() - can trigger long imports
+- FindObjectsOfType<T>() on large scenes - use sparingly
+- while(true) or for(;;) - infinite loops
+- Thread.Sleep(), Task.Wait(), .Result - blocking calls
+
+The tool will refuse to run if Unity is compiling. Keep Unity focused for best results.
+
 Examples:
 - "GameObject.Find(\\"Player\\").transform.position = Vector3.zero;"
 - "Selection.activeGameObject = GameObject.Find(\\"Main Camera\\");"

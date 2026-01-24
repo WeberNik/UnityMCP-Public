@@ -157,7 +157,11 @@ namespace UnityVision.Editor.Transport
         {
             try
             {
-                // This forces Unity to repaint and process pending EditorApplication.delayCall callbacks
+                // More aggressive update forcing to ensure delayCall executes
+                // QueuePlayerLoopUpdate forces the editor to process pending callbacks
+                EditorApplication.QueuePlayerLoopUpdate();
+                
+                // RepaintAllViews forces UI updates which can trigger callback processing
                 InternalEditorUtility.RepaintAllViews();
             }
             catch
@@ -560,8 +564,12 @@ namespace UnityVision.Editor.Transport
             var commandId = message["id"]?.ToString();
             var commandName = message["name"]?.ToString();
             var parameters = message["params"] as JObject ?? new JObject();
+            var startTime = DateTime.Now;
             
             FileLogger.Log("INFO", "WebSocketClient", $"Executing command: {commandName} ({commandId})");
+            
+            // Record that we RECEIVED the command (even if it hangs, this will show in activity)
+            BridgeConfig.RecordActivity(commandName + " [started]", 0, true, null);
             
             JObject resultMessage = new JObject
             {
@@ -648,8 +656,9 @@ namespace UnityVision.Editor.Transport
                 await SendMessageAsync(resultMessage);
             }
             
-            // Record activity for UI
-            BridgeConfig.RecordActivity(commandName, 0, success, errorMsg);
+            // Record activity for UI (with actual duration)
+            var durationMs = (int)(DateTime.Now - startTime).TotalMilliseconds;
+            BridgeConfig.RecordActivity(commandName, durationMs, success, errorMsg);
         }
         
         /// <summary>
