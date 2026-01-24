@@ -74,13 +74,13 @@ Instead of copy-pasting error messages or describing your scene hierarchy, the A
 | Unity 2021.3 LTS | ⚠️ Should work | Minimum supported version |
 | Unity 2020.x and earlier | ❌ Not supported | Missing required APIs |
 
-> **Note:** UnityVision uses some internal Unity Editor APIs via reflection (e.g., for console log file/line info). These may change between Unity versions. If you encounter issues, please [report them](https://github.com/nicweberdev/UnityVision/issues).
+> **Note:** UnityVision uses some internal Unity Editor APIs via reflection (e.g., for console log file/line info). These may change between Unity versions. If you encounter issues, please [report them](https://github.com/WeberNik/UnityMCP-Public/issues).
 
 ### Step 1: Clone the Repository
 
 ```bash
-git clone https://github.com/nicweberdev/UnityVision.git
-cd UnityVision
+git clone https://github.com/WeberNik/UnityMCP-Public.git
+cd UnityMCP-Public
 ```
 
 ### Step 2: Install the Unity Package
@@ -89,13 +89,13 @@ cd UnityVision
 1. Open Unity
 2. Go to `Window > Package Manager`
 3. Click `+` → `Add package from git URL...`
-4. Paste: `https://github.com/nicweberdev/UnityVision.git?path=/Packages/com.unityvision.bridge`
+4. Paste: `https://github.com/WeberNik/UnityMCP-Public.git?path=/Packages/com.unityvision.bridge`
 
 **Option B: Add via manifest.json**
 ```json
 {
   "dependencies": {
-    "com.unityvision.bridge": "https://github.com/nicweberdev/UnityVision.git?path=/Packages/com.unityvision.bridge"
+    "com.unityvision.bridge": "https://github.com/WeberNik/UnityMCP-Public.git?path=/Packages/com.unityvision.bridge"
   }
 }
 ```
@@ -104,18 +104,34 @@ cd UnityVision
 ```json
 {
   "dependencies": {
-    "com.unityvision.bridge": "file:../path/to/UnityVision/Packages/com.unityvision.bridge"
+    "com.unityvision.bridge": "file:../path/to/UnityMCP-Public/Packages/com.unityvision.bridge"
   }
 }
 ```
 
-### Step 3: Build the MCP Server
+### Step 3: Build or Download the MCP Server
+
+**Option A: Build locally (recommended if you change server code)**
 
 ```bash
 cd unity-mcp-server
 npm install
 npm run build
 ```
+
+**Option B: Download the prebuilt server (no npm needed)**
+
+Grab the `unity-mcp-server-prebuilt.zip` asset from the latest GitHub Release: https://github.com/WeberNik/UnityMCP-Public/releases/latest
+
+It includes `dist/` and `node_modules/`, so you can run the server without installing npm.
+
+Unzip it anywhere, then point your MCP client at:
+
+```
+<unzipped-folder>/unity-mcp-server/dist/server.js
+```
+
+> **Note:** Node.js is still required to run the server.
 
 ### Step 4: Configure Your AI Client
 
@@ -136,7 +152,7 @@ If you prefer manual setup, add this to your AI client's MCP config:
   "mcpServers": {
     "unity-vision": {
       "command": "node",
-      "args": ["/absolute/path/to/UnityVision/unity-mcp-server/dist/server.js"]
+      "args": ["/absolute/path/to/UnityMCP-Public/unity-mcp-server/dist/server.js"]
     }
   }
 }
@@ -159,7 +175,7 @@ If you prefer manual setup, add this to your AI client's MCP config:
 ```json
 "unity-vision": {
   "command": "node",
-  "args": ["/path/to/UnityVision/unity-mcp-server/dist/server.js"]
+  "args": ["/path/to/UnityMCP-Public/unity-mcp-server/dist/server.js"]
 }
 ```
 
@@ -181,7 +197,7 @@ After saving, **restart Windsurf** to load the new MCP server.
   "mcpServers": {
     "unity-vision": {
       "command": "node",
-      "args": ["/absolute/path/to/UnityVision/unity-mcp-server/dist/server.js"]
+      "args": ["/absolute/path/to/UnityMCP-Public/unity-mcp-server/dist/server.js"]
     }
   }
 }
@@ -200,7 +216,7 @@ Open Cursor Settings → MCP Servers → Add new server with:
 {
   "unity-vision": {
     "command": "node",
-    "args": ["/absolute/path/to/UnityVision/unity-mcp-server/dist/server.js"]
+    "args": ["/absolute/path/to/UnityMCP-Public/unity-mcp-server/dist/server.js"]
   }
 }
 ```
@@ -450,7 +466,7 @@ UnityVision is designed with safety in mind:
 ## 📁 Project Structure
 
 ```
-UnityVision/
+UnityMCP-Public/
 ├── unity-mcp-server/              # Node.js MCP server
 │   ├── src/
 │   │   ├── server.ts              # MCP entry point
@@ -544,10 +560,10 @@ Contributions are welcome! Here's how you can help:
 
 ```bash
 # Clone your fork
-git clone https://github.com/YOUR_USERNAME/UnityVision.git
+git clone https://github.com/YOUR_USERNAME/UnityMCP-Public.git
 
 # Install dependencies
-cd UnityVision/unity-mcp-server
+cd UnityMCP-Public/unity-mcp-server
 npm install
 
 # Build in watch mode

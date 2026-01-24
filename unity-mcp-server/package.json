@@ -30,16 +30,16 @@
     "model-context-protocol",
     "editor-tools"
   ],
-  "author": "nicweberdev",
+  "author": "WeberNik",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nicweberdev/UnityVision.git"
+    "url": "git+https://github.com/WeberNik/UnityMCP-Public.git"
   },
   "bugs": {
-    "url": "https://github.com/nicweberdev/UnityVision/issues"
+    "url": "https://github.com/WeberNik/UnityMCP-Public/issues"
   },
-  "homepage": "https://github.com/nicweberdev/UnityVision#readme",
+  "homepage": "https://github.com/WeberNik/UnityMCP-Public#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "ws": "^8.18.0"
