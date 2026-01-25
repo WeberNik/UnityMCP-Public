@@ -59,7 +59,8 @@ namespace UnityVision.Editor.Transport
         };
         
         // Configuration
-        private const int DEFAULT_PORT = 7890;
+        private const int DEFAULT_PORT = 6400;
+        private const string PORT_PREF_KEY = "UnityVision_WebSocketPort";
         private const int PING_INTERVAL_MS = 15000;
         
         // Pending command responses
@@ -78,13 +79,47 @@ namespace UnityVision.Editor.Transport
         public static DateTime? ConnectedSince => _isConnected ? _connectedSince : (DateTime?)null;
         public static int Port { get; private set; } = DEFAULT_PORT;
         
+        /// <summary>
+        /// Set the WebSocket port and save to EditorPrefs. Requires reconnect to take effect.
+        /// </summary>
+        public static void SetPort(int newPort)
+        {
+            if (newPort < 1 || newPort > 65535)
+            {
+                UnityEngine.Debug.LogError($"[UnityVision] Invalid port: {newPort}. Must be between 1 and 65535.");
+                return;
+            }
+            
+            Port = newPort;
+            UnityEditor.EditorPrefs.SetInt(PORT_PREF_KEY, newPort);
+            UnityEngine.Debug.Log($"[UnityVision] Port set to {newPort}. Reconnect to apply.");
+        }
+        
+        /// <summary>
+        /// Reset port to default value
+        /// </summary>
+        public static void ResetPort()
+        {
+            Port = DEFAULT_PORT;
+            UnityEditor.EditorPrefs.DeleteKey(PORT_PREF_KEY);
+            UnityEngine.Debug.Log($"[UnityVision] Port reset to default ({DEFAULT_PORT}). Reconnect to apply.");
+        }
+        
         static WebSocketClient()
         {
-            // Read port from environment or use default
-            var portEnv = Environment.GetEnvironmentVariable("UNITY_VISION_WS_PORT");
-            if (!string.IsNullOrEmpty(portEnv) && int.TryParse(portEnv, out int port))
+            // Read port from EditorPrefs first, then environment, then default
+            int savedPort = UnityEditor.EditorPrefs.GetInt(PORT_PREF_KEY, 0);
+            if (savedPort > 0)
             {
-                Port = port;
+                Port = savedPort;
+            }
+            else
+            {
+                var portEnv = Environment.GetEnvironmentVariable("UNITY_VISION_WS_PORT");
+                if (!string.IsNullOrEmpty(portEnv) && int.TryParse(portEnv, out int port))
+                {
+                    Port = port;
+                }
             }
             
             // Subscribe to Unity lifecycle events
@@ -567,6 +602,7 @@ namespace UnityVision.Editor.Transport
             var startTime = DateTime.Now;
             
             FileLogger.Log("INFO", "WebSocketClient", $"Executing command: {commandName} ({commandId})");
+            BridgeConfig.SetPendingCommand(commandName, commandId);
             
             // Record that we RECEIVED the command (even if it hangs, this will show in activity)
             BridgeConfig.RecordActivity(commandName + " [started]", 0, true, null);
@@ -579,67 +615,90 @@ namespace UnityVision.Editor.Transport
             
             bool success = false;
             string errorMsg = null;
+            bool shouldExecute = true;
             
             try
             {
-                // First, check if this is a custom tool (Phase 45)
-                if (ToolRegistry.TryGetTool(commandName, out var customTool))
+                if (EditorApplication.isCompiling || EditorApplication.isUpdating || EditorApplication.isPlayingOrWillChangePlaymode)
                 {
-                    FileLogger.Log("INFO", "WebSocketClient", $"Executing custom tool: {commandName}");
+                    var reasons = new List<string>();
+                    if (EditorApplication.isCompiling) reasons.Add("compiling scripts");
+                    if (EditorApplication.isUpdating) reasons.Add("updating assets");
+                    if (EditorApplication.isPlayingOrWillChangePlaymode) reasons.Add("changing play mode");
                     
-                    JObject toolResult;
-                    if (customTool.IsAsync)
+                    errorMsg = $"Unity is busy ({string.Join(", ", reasons)}). Please retry in a moment.";
+                    resultMessage["error"] = new JObject
                     {
-                        var tcs = new TaskCompletionSource<JObject>();
-                        customTool.ExecuteAsync(parameters, tcs);
-                        toolResult = await tcs.Task;
-                    }
-                    else
-                    {
-                        toolResult = customTool.Execute(parameters);
-                    }
-                    
-                    // Check if tool returned an error
-                    if (toolResult.ContainsKey("error"))
-                    {
-                        resultMessage["error"] = toolResult["error"];
-                        errorMsg = toolResult["error"]?["message"]?.ToString();
-                    }
-                    else
-                    {
-                        resultMessage["result"] = toolResult;
-                        success = true;
-                    }
-                }
-                else
-                {
-                    // Fall back to RpcHandler for built-in commands
-                    var request = new RpcRequest
-                    {
-                        Method = commandName,
-                        Params = parameters
+                        ["code"] = "UNITY_BUSY",
+                        ["message"] = errorMsg
                     };
                     
-                    var response = RpcHandler.HandleRequest(request);
-                    
-                    if (response.Error != null)
+                    await SendMessageAsync(resultMessage);
+                    success = false;
+                    shouldExecute = false;
+                }
+                
+                if (shouldExecute)
+                {
+                    // First, check if this is a custom tool (Phase 45)
+                    if (ToolRegistry.TryGetTool(commandName, out var customTool))
                     {
-                        resultMessage["error"] = new JObject
+                        FileLogger.Log("INFO", "WebSocketClient", $"Executing custom tool: {commandName}");
+                        
+                        JObject toolResult;
+                        if (customTool.IsAsync)
                         {
-                            ["code"] = response.Error.Code,
-                            ["message"] = response.Error.Message
-                        };
-                        errorMsg = response.Error.Message;
+                            var tcs = new TaskCompletionSource<JObject>();
+                            customTool.ExecuteAsync(parameters, tcs);
+                            toolResult = await tcs.Task;
+                        }
+                        else
+                        {
+                            toolResult = customTool.Execute(parameters);
+                        }
+                        
+                        // Check if tool returned an error
+                        if (toolResult.ContainsKey("error"))
+                        {
+                            resultMessage["error"] = toolResult["error"];
+                            errorMsg = toolResult["error"]?["message"]?.ToString();
+                        }
+                        else
+                        {
+                            resultMessage["result"] = toolResult;
+                            success = true;
+                        }
                     }
                     else
                     {
-                        resultMessage["result"] = JToken.FromObject(response.Result ?? new { success = true });
-                        success = true;
+                        // Fall back to RpcHandler for built-in commands
+                        var request = new RpcRequest
+                        {
+                            Method = commandName,
+                            Params = parameters
+                        };
+                        
+                        var response = RpcHandler.HandleRequest(request);
+                        
+                        if (response.Error != null)
+                        {
+                            resultMessage["error"] = new JObject
+                            {
+                                ["code"] = response.Error.Code,
+                                ["message"] = response.Error.Message
+                            };
+                            errorMsg = response.Error.Message;
+                        }
+                        else
+                        {
+                            resultMessage["result"] = JToken.FromObject(response.Result ?? new { success = true });
+                            success = true;
+                        }
                     }
+                    
+                    await SendMessageAsync(resultMessage);
+                    FileLogger.Log("INFO", "WebSocketClient", $"Command completed: {commandName} (success: {success})");
                 }
-                
-                await SendMessageAsync(resultMessage);
-                FileLogger.Log("INFO", "WebSocketClient", $"Command completed: {commandName} (success: {success})");
             }
             catch (Exception ex)
             {
@@ -654,6 +713,10 @@ namespace UnityVision.Editor.Transport
                 };
                 
                 await SendMessageAsync(resultMessage);
+            }
+            finally
+            {
+                BridgeConfig.ClearPendingCommand(commandId);
             }
             
             // Record activity for UI (with actual duration)

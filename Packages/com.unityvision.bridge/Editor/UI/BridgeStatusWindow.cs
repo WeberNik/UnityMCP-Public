@@ -29,11 +29,13 @@ namespace UnityVision.Editor.UI
         private GUIStyle _waitingStyle;
         private GUIStyle _configuredStyle;
         private GUIStyle _notConfiguredStyle;
+        private GUIStyle _pendingStyle;
         
         private bool _showActivity = true;
         private bool _showIDEConfig = true;
         
         private string _mcpServerPath = "";
+        private int _portInput = 6400;
         private List<IDEInfo> _detectedIDEs = new List<IDEInfo>();
         
         private double _lastRepaintTime;
@@ -51,6 +53,7 @@ namespace UnityVision.Editor.UI
         {
             EditorApplication.update += OnUpdate;
             LoadMcpServerPath();
+            _portInput = WebSocketClient.Port;
             DetectIDEs();
         }
 
@@ -150,6 +153,12 @@ namespace UnityVision.Editor.UI
                 _notConfiguredStyle = new GUIStyle(EditorStyles.label);
                 _notConfiguredStyle.normal.textColor = new Color(1f, 0.8f, 0.3f);
             }
+            
+            if (_pendingStyle == null)
+            {
+                _pendingStyle = new GUIStyle(EditorStyles.label);
+                _pendingStyle.normal.textColor = new Color(1f, 0.75f, 0.2f);
+            }
         }
 
         private void OnGUI()
@@ -186,6 +195,11 @@ namespace UnityVision.Editor.UI
 
             // MCP Server Path section
             DrawMcpServerPathSection();
+
+            EditorGUILayout.Space(10);
+
+            // Port Configuration section
+            DrawPortConfigSection();
 
             EditorGUILayout.Space(10);
 
@@ -251,6 +265,13 @@ namespace UnityVision.Editor.UI
             else
             {
                 EditorGUILayout.LabelField("Waiting for MCP server (Windsurf)...", EditorStyles.miniLabel);
+            }
+            
+            if (BridgeConfig.HasPendingCommand)
+            {
+                var since = BridgeConfig.PendingSince;
+                var sinceText = since.HasValue ? GetRelativeTime(since.Value) : "just now";
+                EditorGUILayout.LabelField($"Pending: {BridgeConfig.PendingCommand} ({sinceText})", _pendingStyle);
             }
 
             EditorGUILayout.Space(5);
@@ -428,6 +449,54 @@ namespace UnityVision.Editor.UI
             else
             {
                 EditorGUILayout.LabelField("✗ Run 'npm run build' first", _errorStyle);
+            }
+            
+            EditorGUILayout.EndVertical();
+        }
+
+        private void DrawPortConfigSection()
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("🔌 WebSocket Port", _subHeaderStyle);
+            
+            EditorGUILayout.BeginHorizontal();
+            
+            // Port input field
+            EditorGUILayout.LabelField("Port:", GUILayout.Width(35));
+            _portInput = EditorGUILayout.IntField(_portInput, GUILayout.Width(60));
+            
+            // Apply button
+            bool portChanged = _portInput != WebSocketClient.Port;
+            GUI.enabled = portChanged && _portInput >= 1 && _portInput <= 65535;
+            if (GUILayout.Button("Apply", GUILayout.Width(50)))
+            {
+                WebSocketClient.SetPort(_portInput);
+                WebSocketClient.Reconnect();
+                DetectIDEs(); // Refresh IDE config status
+            }
+            GUI.enabled = true;
+            
+            // Reset button
+            if (GUILayout.Button("Reset", GUILayout.Width(50)))
+            {
+                WebSocketClient.ResetPort();
+                _portInput = WebSocketClient.Port;
+                WebSocketClient.Reconnect();
+                DetectIDEs();
+            }
+            
+            GUILayout.FlexibleSpace();
+            
+            EditorGUILayout.EndHorizontal();
+            
+            // Info/warning
+            if (portChanged)
+            {
+                EditorGUILayout.LabelField("⚠ Click Apply to change port (requires MCP client restart)", _notConfiguredStyle);
+            }
+            else
+            {
+                EditorGUILayout.LabelField($"Default: 6400 | Current: {WebSocketClient.Port}", EditorStyles.miniLabel);
             }
             
             EditorGUILayout.EndVertical();
@@ -642,6 +711,7 @@ namespace UnityVision.Editor.UI
         private void ConfigureIDE(IDEInfo ide)
         {
             string serverJsPath = Path.Combine(_mcpServerPath, "dist", "server.js").Replace("\\", "/");
+            int currentPort = WebSocketClient.Port;
 
             try
             {
@@ -681,11 +751,17 @@ namespace UnityVision.Editor.UI
                     config[ide.ConfigKey] = mcpServers;
                 }
 
-                // Add/update unity-vision entry
+                // Add/update unity-vision entry with port env var
+                var envVars = new Dictionary<string, string>
+                {
+                    { "UNITY_VISION_WS_PORT", currentPort.ToString() }
+                };
+                
                 mcpServers["unity-vision"] = Newtonsoft.Json.Linq.JObject.FromObject(new
                 {
                     command = "node",
-                    args = new[] { serverJsPath }
+                    args = new[] { serverJsPath },
+                    env = envVars
                 });
 
                 // Write config
@@ -697,6 +773,7 @@ namespace UnityVision.Editor.UI
 
                 EditorUtility.DisplayDialog("Success", 
                     $"UnityVision configured for {ide.Name}!\n\n" +
+                    $"Port: {currentPort}\n\n" +
                     "Restart your AI client to apply changes.", "OK");
             }
             catch (Exception ex)

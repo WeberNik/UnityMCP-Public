@@ -36,11 +36,14 @@ namespace UnityVision.Editor.Bridge
         private static int _requestCount;
         private static List<RequestActivity> _recentActivity = new List<RequestActivity>();
         private static readonly object _activityLock = new object();
+        private static string _pendingCommand;
+        private static string _pendingRequestId;
+        private static DateTime? _pendingSince;
 
         /// <summary>
         /// Default WebSocket port for MCP server connection
         /// </summary>
-        public static int DefaultPort { get; private set; } = 7890;
+        public static int DefaultPort { get; private set; } = 6400;
         
         /// <summary>
         /// Total number of requests processed
@@ -75,11 +78,44 @@ namespace UnityVision.Editor.Bridge
                 }
             }
         }
+        
+        public static bool HasPendingCommand
+        {
+            get
+            {
+                lock (_activityLock)
+                {
+                    return !string.IsNullOrEmpty(_pendingCommand);
+                }
+            }
+        }
+        
+        public static string PendingCommand
+        {
+            get
+            {
+                lock (_activityLock)
+                {
+                    return _pendingCommand;
+                }
+            }
+        }
+        
+        public static DateTime? PendingSince
+        {
+            get
+            {
+                lock (_activityLock)
+                {
+                    return _pendingSince;
+                }
+            }
+        }
 
         static BridgeConfig()
         {
             // Read port from environment variable if set
-            var portEnv = Environment.GetEnvironmentVariable("UNITY_VISION_PORT");
+            var portEnv = Environment.GetEnvironmentVariable("UNITY_VISION_WS_PORT");
             if (!string.IsNullOrEmpty(portEnv) && int.TryParse(portEnv, out int port))
             {
                 DefaultPort = port;
@@ -131,6 +167,31 @@ namespace UnityVision.Editor.Bridge
             
             _requestCount++;
             LastRequestTime = DateTime.Now;
+        }
+        
+        public static void SetPendingCommand(string method, string requestId)
+        {
+            lock (_activityLock)
+            {
+                _pendingCommand = method;
+                _pendingRequestId = requestId;
+                _pendingSince = DateTime.Now;
+            }
+        }
+        
+        public static void ClearPendingCommand(string requestId = null)
+        {
+            lock (_activityLock)
+            {
+                if (requestId != null && _pendingRequestId != requestId)
+                {
+                    return;
+                }
+                
+                _pendingCommand = null;
+                _pendingRequestId = null;
+                _pendingSince = null;
+            }
         }
         
         /// <summary>

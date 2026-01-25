@@ -25,7 +25,7 @@ const SERVER_VERSION = '1.1.0';
 
 async function main() {
   // Get WebSocket port from environment or use default
-  const wsPort = parseInt(process.env.UNITY_VISION_WS_PORT || '7890', 10);
+  const wsPort = parseInt(process.env.UNITY_VISION_WS_PORT || '6400', 10);
   
   fileLog('INFO', 'Server', 'Starting UnityVision MCP server...');
   console.error('[UnityVision] Starting MCP server...');
@@ -33,9 +33,10 @@ async function main() {
   // Start WebSocket hub for Unity connections
   console.error(`[UnityVision] Starting WebSocket hub on port ${wsPort}...`);
   const hub = await startWebSocketHub(wsPort);
+  const actualPort = hub.getPort();
   
-  fileLog('INFO', 'Server', `WebSocket hub started on port ${wsPort}`);
-  console.error(`[UnityVision] WebSocket hub ready - Unity can connect to ws://localhost:${wsPort}`);
+  fileLog('INFO', 'Server', `WebSocket hub started on port ${actualPort}`);
+  console.error(`[UnityVision] WebSocket hub ready - Unity can connect to ws://localhost:${actualPort}`);
 
   // Create MCP server
   const server = new Server(

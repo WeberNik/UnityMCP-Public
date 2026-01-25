@@ -400,12 +400,20 @@ namespace UnityVision.Editor.UI
         {
             // Try to find the MCP server relative to the Unity project
             string projectPath = Application.dataPath;
-            string[] possiblePaths = new[]
+            var possiblePaths = new List<string>
             {
                 Path.GetFullPath(Path.Combine(projectPath, "../unity-mcp-server/dist/server.js")),
                 Path.GetFullPath(Path.Combine(projectPath, "../../unity-mcp-server/dist/server.js")),
                 Path.GetFullPath(Path.Combine(projectPath, "../UnityMCP/unity-mcp-server/dist/server.js")),
             };
+            
+            // Also check the configured MCP server path from Bridge Status (if set)
+            var configuredPath = UnityVision.Editor.Utils.McpServerSetup.GetServerPath();
+            if (!string.IsNullOrEmpty(configuredPath))
+            {
+                var configuredServer = Path.Combine(configuredPath, "dist", "server.js");
+                possiblePaths.Insert(0, configuredServer);
+            }
 
             foreach (var path in possiblePaths)
             {

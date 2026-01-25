@@ -123,7 +123,7 @@ export class WebSocketPluginHub {
   private readonly RATE_LIMIT_WINDOW_MS = 1000; // 1 second window
   private readonly RATE_LIMIT_MAX_REQUESTS = 50; // Max requests per window
   
-  private constructor(port: number = 7890) {
+  private constructor(port: number = 6400) {
     this.port = port;
   }
   
@@ -144,42 +144,14 @@ export class WebSocketPluginHub {
       return;
     }
     
-    // Try to start on the configured port, with fallback to find an available port
-    const maxRetries = 10;
-    let lastError: Error | null = null;
-    
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      const portToTry = this.port + attempt;
-      
-      try {
-        await this.tryStartOnPort(portToTry);
-        this.port = portToTry; // Update to actual port used
-        return;
-      } catch (error) {
-        lastError = error as Error;
-        const errorMessage = lastError.message || String(lastError);
-        
-        // Only retry on EADDRINUSE (port already in use)
-        if (errorMessage.includes('EADDRINUSE') || errorMessage.includes('address already in use')) {
-          fileLog('WARN', 'WebSocketHub', `Port ${portToTry} in use, trying ${portToTry + 1}...`);
-          console.error(`[UnityVision] Port ${portToTry} in use, trying next port...`);
-          continue;
-        }
-        
-        // For other errors, don't retry
-        break;
-      }
+    try {
+      await this.tryStartOnPort(this.port);
+    } catch (error) {
+      const errorMessage = (error as Error).message || String(error);
+      fileLog('ERROR', 'WebSocketHub', `Failed to start on port ${this.port}: ${errorMessage}`);
+      console.error(`[UnityVision] Failed to start WebSocket server on port ${this.port}`);
+      throw error;
     }
-    
-    // All retries failed - but don't crash! Run in "disconnected" mode
-    fileLog('WARN', 'WebSocketHub', `Could not bind to any port (tried ${this.port}-${this.port + maxRetries - 1}). Running in disconnected mode.`);
-    console.error(`[UnityVision] Warning: Could not start WebSocket server. Another instance may be running.`);
-    console.error(`[UnityVision] This instance will work but cannot receive Unity connections directly.`);
-    console.error(`[UnityVision] Unity projects should connect to the first MCP server instance.`);
-    
-    // Mark as "running" but without a server - tools will return graceful errors
-    this.isRunning = false;
-    this.wss = null;
   }
   
   private tryStartOnPort(port: number): Promise<void> {
@@ -649,7 +621,7 @@ export function getWebSocketHub(port?: number): WebSocketPluginHub {
   return hubInstance;
 }
 
-export async function startWebSocketHub(port: number = 7890): Promise<WebSocketPluginHub> {
+export async function startWebSocketHub(port: number = 6400): Promise<WebSocketPluginHub> {
   const hub = getWebSocketHub(port);
   await hub.start();
   return hub;
