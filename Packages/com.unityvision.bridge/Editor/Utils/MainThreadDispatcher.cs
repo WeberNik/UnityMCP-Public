@@ -24,6 +24,8 @@ namespace UnityVision.Editor.Utils
         
         static MainThreadDispatcher()
         {
+            // Unsubscribe first to prevent duplicate handlers after domain reload
+            EditorApplication.update -= ProcessQueue;
             EditorApplication.update += ProcessQueue;
         }
         
@@ -147,6 +149,8 @@ namespace UnityVision.Editor.Utils
         
         static EditorCoroutineRunner()
         {
+            // Unsubscribe first to prevent duplicate handlers after domain reload
+            EditorApplication.update -= Update;
             EditorApplication.update += Update;
         }
         

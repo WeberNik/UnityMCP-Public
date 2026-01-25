@@ -122,14 +122,57 @@ namespace UnityVision.Editor.Handlers
 
             try
             {
-                var allObjects = UnityEngine.Object.FindObjectsOfType<GameObject>(true);
                 var results = new List<FoundObject>();
+                int totalScanned = 0;
+                
+                // Optimization: If searching for a specific component type, try to find it directly first
+                if (!string.IsNullOrEmpty(req.componentType))
+                {
+                    // Try to find the type directly for much faster lookup
+                    Type targetType = FindComponentType(req.componentType);
+                    
+                    if (targetType != null)
+                    {
+                        // Use FindObjectsOfType with the specific component type - much faster!
+                        var components = UnityEngine.Object.FindObjectsOfType(targetType, true) as Component[];
+                        if (components != null)
+                        {
+                            foreach (var comp in components)
+                            {
+                                if (results.Count >= req.maxResults) break;
+                                
+                                var go = comp.gameObject;
+                                totalScanned++;
+                                
+                                // Apply additional filters
+                                if (!string.IsNullOrEmpty(req.tag) && go.tag != req.tag) continue;
+                                if (!string.IsNullOrEmpty(req.layer) && LayerMask.LayerToName(go.layer) != req.layer) continue;
+                                if (req.activeOnly.HasValue && go.activeInHierarchy != req.activeOnly.Value) continue;
+                                if (!string.IsNullOrEmpty(req.nameContains) && 
+                                    !go.name.Contains(req.nameContains, StringComparison.OrdinalIgnoreCase)) continue;
+                                
+                                results.Add(CreateFoundObject(go));
+                            }
+                            
+                            return RpcResponse.Success(new FindObjectsResponse
+                            {
+                                totalFound = totalScanned,
+                                returnedCount = results.Count,
+                                objects = results
+                            });
+                        }
+                    }
+                }
+                
+                // Fallback: Iterate through all GameObjects (slower but handles partial name matches)
+                var allObjects = UnityEngine.Object.FindObjectsOfType<GameObject>(true);
 
                 foreach (var go in allObjects)
                 {
                     if (results.Count >= req.maxResults) break;
+                    totalScanned++;
 
-                    // Filter by component type
+                    // Filter by component type (partial match)
                     if (!string.IsNullOrEmpty(req.componentType))
                     {
                         bool hasComponent = false;
@@ -147,47 +190,24 @@ namespace UnityVision.Editor.Handlers
                     }
 
                     // Filter by tag
-                    if (!string.IsNullOrEmpty(req.tag) && go.tag != req.tag)
-                    {
-                        continue;
-                    }
+                    if (!string.IsNullOrEmpty(req.tag) && go.tag != req.tag) continue;
 
                     // Filter by layer
-                    if (!string.IsNullOrEmpty(req.layer) && LayerMask.LayerToName(go.layer) != req.layer)
-                    {
-                        continue;
-                    }
+                    if (!string.IsNullOrEmpty(req.layer) && LayerMask.LayerToName(go.layer) != req.layer) continue;
 
                     // Filter by active state
-                    if (req.activeOnly.HasValue && go.activeInHierarchy != req.activeOnly.Value)
-                    {
-                        continue;
-                    }
+                    if (req.activeOnly.HasValue && go.activeInHierarchy != req.activeOnly.Value) continue;
 
                     // Filter by name
                     if (!string.IsNullOrEmpty(req.nameContains) && 
-                        !go.name.Contains(req.nameContains, StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
+                        !go.name.Contains(req.nameContains, StringComparison.OrdinalIgnoreCase)) continue;
 
-                    results.Add(new FoundObject
-                    {
-                        path = GetGameObjectPath(go),
-                        name = go.name,
-                        tag = go.tag,
-                        layer = LayerMask.LayerToName(go.layer),
-                        isActive = go.activeInHierarchy,
-                        components = go.GetComponents<Component>()
-                            .Where(c => c != null)
-                            .Select(c => c.GetType().Name)
-                            .ToList()
-                    });
+                    results.Add(CreateFoundObject(go));
                 }
 
                 return RpcResponse.Success(new FindObjectsResponse
                 {
-                    totalFound = results.Count,
+                    totalFound = totalScanned,
                     returnedCount = results.Count,
                     objects = results
                 });
@@ -196,6 +216,49 @@ namespace UnityVision.Editor.Handlers
             {
                 return RpcResponse.Failure("QUERY_ERROR", ex.Message);
             }
+        }
+        
+        private static Type FindComponentType(string typeName)
+        {
+            // Try exact match first
+            var type = Type.GetType($"UnityEngine.{typeName}, UnityEngine.CoreModule");
+            if (type != null) return type;
+            
+            // Try common Unity modules
+            string[] modules = { "UnityEngine.CoreModule", "UnityEngine.PhysicsModule", "UnityEngine.AudioModule", 
+                                 "UnityEngine.AnimationModule", "UnityEngine.UIModule", "UnityEngine.UI" };
+            foreach (var module in modules)
+            {
+                type = Type.GetType($"UnityEngine.{typeName}, {module}");
+                if (type != null) return type;
+            }
+            
+            // Search all loaded assemblies
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                type = assembly.GetTypes().FirstOrDefault(t => 
+                    t.Name.Equals(typeName, StringComparison.OrdinalIgnoreCase) && 
+                    typeof(Component).IsAssignableFrom(t));
+                if (type != null) return type;
+            }
+            
+            return null;
+        }
+        
+        private static FoundObject CreateFoundObject(GameObject go)
+        {
+            return new FoundObject
+            {
+                path = GetGameObjectPath(go),
+                name = go.name,
+                tag = go.tag,
+                layer = LayerMask.LayerToName(go.layer),
+                isActive = go.activeInHierarchy,
+                components = go.GetComponents<Component>()
+                    .Where(c => c != null)
+                    .Select(c => c.GetType().Name)
+                    .ToList()
+            };
         }
 
         public static RpcResponse FindMissingReferences(RpcRequest request)

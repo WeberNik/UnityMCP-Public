@@ -82,8 +82,11 @@ namespace UnityVision.Editor.Registry
                 }
             }
             
-            // Register this project
-            RegisterProject();
+            // Unsubscribe first to prevent duplicate handlers after domain reload
+            EditorApplication.update -= Heartbeat;
+            EditorApplication.quitting -= UnregisterProject;
+            AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
+            AssemblyReloadEvents.afterAssemblyReload -= OnAfterAssemblyReload;
             
             // Set up heartbeat
             EditorApplication.update += Heartbeat;
@@ -92,6 +95,20 @@ namespace UnityVision.Editor.Registry
             EditorApplication.quitting += UnregisterProject;
             AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
             AssemblyReloadEvents.afterAssemblyReload += OnAfterAssemblyReload;
+            
+            // Delay registration until after domain reload is complete
+            // This prevents issues during Play mode transition
+            EditorApplication.delayCall += DelayedRegister;
+        }
+        
+        /// <summary>
+        /// Delayed registration - called after domain reload is complete
+        /// </summary>
+        private static void DelayedRegister()
+        {
+            // Note: We don't check isPlaying here because during domain reload 
+            // after exiting play mode, isPlaying can still be true
+            RegisterProject();
         }
 
         /// <summary>

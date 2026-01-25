@@ -148,17 +148,44 @@ namespace UnityVision.Editor.Transport
                 }
             }
             
+            // Unsubscribe first to prevent duplicate handlers after domain reload
+            EditorApplication.quitting -= OnEditorQuitting;
+            AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
+            AssemblyReloadEvents.afterAssemblyReload -= OnAfterAssemblyReload;
+            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+            EditorApplication.update -= Update;
+            
             // Subscribe to Unity lifecycle events
-            EditorApplication.delayCall += () => ConnectAsync();
             EditorApplication.quitting += OnEditorQuitting;
             AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
             AssemblyReloadEvents.afterAssemblyReload += OnAfterAssemblyReload;
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
             EditorApplication.update += Update;
             
-            // Start background keepalive thread to force Unity updates when unfocused
-            StartKeepaliveThread();
             _lastMainThreadActivity = DateTime.Now;
+            
+            // Delay connection and thread creation until after domain reload is complete
+            // This prevents crashes during Play mode transition
+            EditorApplication.delayCall += DelayedInitialize;
+        }
+        
+        /// <summary>
+        /// Delayed initialization - called after domain reload is complete
+        /// </summary>
+        private static void DelayedInitialize()
+        {
+            // Note: We don't check isPlaying here because:
+            // 1. During domain reload after exiting play mode, isPlaying can still be true
+            // 2. The delayCall itself provides the necessary delay
+            // 3. If we're truly in play mode, OnPlayModeStateChanged will handle disconnect
+            
+            FileLogger.Log("INFO", "WebSocketClient", "DelayedInitialize called - starting connection");
+                
+            // Start background keepalive thread
+            StartKeepaliveThread();
+            
+            // Connect to MCP server
+            ConnectAsync();
         }
         
         /// <summary>
@@ -184,21 +211,8 @@ namespace UnityVision.Editor.Transport
         private static void StopKeepaliveThread()
         {
             _keepaliveRunning = false;
-            
-            // Give the thread a moment to exit gracefully
-            if (_keepaliveThread != null && _keepaliveThread.IsAlive)
-            {
-                try
-                {
-                    // Wait up to 100ms for graceful exit
-                    if (!_keepaliveThread.Join(100))
-                    {
-                        // Thread didn't exit, but it's a background thread so it will die with the process
-                        FileLogger.Log("WARN", "WebSocketClient", "Keepalive thread did not exit gracefully");
-                    }
-                }
-                catch { /* ignore */ }
-            }
+            // Don't wait for thread - it's a background thread and will die with the process
+            // Waiting (Thread.Join) can cause issues during domain reload
             _keepaliveThread = null;
         }
         
@@ -298,17 +312,25 @@ namespace UnityVision.Editor.Transport
             switch (state)
             {
                 case PlayModeStateChange.ExitingEditMode:
-                    // About to enter Play Mode - disconnect
-                    if (_isConnected)
-                    {
-                        FileLogger.Log("INFO", "WebSocketClient", "Entering play mode, disconnecting...");
-                        Disconnect();
-                    }
+                    // About to enter Play Mode - just set flags, don't do heavy operations
+                    // Domain reload will clean up threads automatically (they're background threads)
+                    _keepaliveRunning = false;
+                    _isConnected = false;
+                    _isConnecting = false;
+                    FileLogger.Log("INFO", "WebSocketClient", "Entering play mode, marking as disconnected");
                     break;
                     
                 case PlayModeStateChange.EnteredEditMode:
-                    // Returned to Edit Mode - reconnect
-                    EditorApplication.delayCall += () => ConnectAsync();
+                    // Returned to Edit Mode - ensure clean state and reconnect
+                    _isConnected = false;
+                    _isConnecting = false;
+                    _reconnectAttempts = 0;
+                    FileLogger.Log("INFO", "WebSocketClient", "Exited play mode, scheduling reconnect");
+                    EditorApplication.delayCall += () =>
+                    {
+                        FileLogger.Log("INFO", "WebSocketClient", "Reconnecting after play mode");
+                        ConnectAsync();
+                    };
                     break;
             }
         }
@@ -457,15 +479,15 @@ namespace UnityVision.Editor.Transport
             _isConnecting = false;
             _sessionId = null;
             
+            // Stop keepalive thread first (just sets flag, doesn't wait)
+            StopKeepaliveThread();
+            
             try
             {
                 _cts?.Cancel();
                 
-                if (_socket?.State == WebSocketState.Open)
-                {
-                    _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Unity closing", CancellationToken.None).Wait(1000);
-                }
-                
+                // Don't wait for socket close during domain reload - just dispose
+                // .Wait() can cause deadlocks during Unity's domain reload
                 _socket?.Dispose();
                 _socket = null;
             }
@@ -476,7 +498,8 @@ namespace UnityVision.Editor.Transport
             {
                 foreach (var pending in _pendingCommands.Values)
                 {
-                    pending.TrySetException(new Exception("WebSocket disconnected"));
+                    try { pending.TrySetException(new Exception("WebSocket disconnected")); }
+                    catch { /* ignore */ }
                 }
                 _pendingCommands.Clear();
             }
@@ -488,11 +511,16 @@ namespace UnityVision.Editor.Transport
                 _isProcessingCommand = false;
             }
             
-            // Stop keepalive thread to prevent it from running during disconnected state
-            StopKeepaliveThread();
+            // Clear message queue
+            lock (_messageLock)
+            {
+                _pendingMessages.Clear();
+            }
             
             FileLogger.Log("INFO", "WebSocketClient", "Disconnected from MCP server");
-            OnDisconnected?.Invoke();
+            
+            // Don't invoke event during domain reload - it can cause issues
+            // OnDisconnected?.Invoke();
         }
         
         /// <summary>
@@ -500,8 +528,32 @@ namespace UnityVision.Editor.Transport
         /// </summary>
         public static void Reconnect()
         {
-            Disconnect();
+            FileLogger.Log("INFO", "WebSocketClient", "Reconnect called - forcing disconnect and reconnect");
+            
+            // Force disconnect even if flags say we're not connected
+            _isConnected = false;
+            _isConnecting = false;
+            _sessionId = null;
             _reconnectAttempts = 0;
+            
+            // Stop keepalive
+            StopKeepaliveThread();
+            
+            // Dispose old socket
+            try
+            {
+                _cts?.Cancel();
+                _socket?.Dispose();
+                _socket = null;
+            }
+            catch { /* ignore */ }
+            
+            // Clear queues
+            lock (_queueLock) { _commandQueue.Clear(); _isProcessingCommand = false; }
+            lock (_messageLock) { _pendingMessages.Clear(); }
+            lock (_lock) { _pendingCommands.Clear(); }
+            
+            // Connect
             ConnectAsync();
         }
         

@@ -60,12 +60,32 @@ namespace UnityVision.Editor.Bridge
             // Generate pipe name from project path
             PipeName = GeneratePipeName();
             
-            Start();
+            // Unsubscribe first to prevent duplicate handlers after domain reload
+            EditorApplication.quitting -= Stop;
+            AssemblyReloadEvents.beforeAssemblyReload -= Stop;
+            EditorApplication.update -= ProcessPendingRequests;
+            
+            // Subscribe to lifecycle events
             EditorApplication.quitting += Stop;
             AssemblyReloadEvents.beforeAssemblyReload += Stop;
             
             // Register for main thread updates to process queued requests
             EditorApplication.update += ProcessPendingRequests;
+            
+            // Delay server start until after domain reload is complete
+            // This prevents crashes during Play mode transition
+            EditorApplication.delayCall += DelayedStart;
+        }
+        
+        /// <summary>
+        /// Delayed start - called after domain reload is complete
+        /// </summary>
+        private static void DelayedStart()
+        {
+            // Note: We don't check isPlaying here because during domain reload 
+            // after exiting play mode, isPlaying can still be true
+            FileLogger.Log("INFO", "NamedPipeBridge", "DelayedStart called - starting pipe server");
+            Start();
         }
         
         /// <summary>
@@ -167,17 +187,16 @@ namespace UnityVision.Editor.Bridge
             _isRunning = false;
             _cancellationSource?.Cancel();
             
-            // Clean up client threads
+            // Don't wait for threads or interrupt them during domain reload
+            // They're background threads and will die with the process
+            // Thread.Interrupt() can cause issues during domain reload
             lock (_lock)
             {
-                foreach (var thread in _clientThreads)
-                {
-                    try { thread.Interrupt(); } catch { }
-                }
                 _clientThreads.Clear();
             }
             
-            Debug.Log("[UnityVision] Named Pipe server stopped");
+            // Use FileLogger instead of Debug.Log during shutdown - safer during domain reload
+            FileLogger.Log("INFO", "NamedPipeBridge", "Named Pipe server stopped");
         }
         
         /// <summary>

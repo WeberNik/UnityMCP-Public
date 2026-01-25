@@ -1068,49 +1068,55 @@ export const consolidatedToolHandlers: Record<string, (params: ToolParams) => Pr
 
   // 5. unity_component
   unity_component: async (params) => {
-    const { action, ...rest } = params;
+    const { action, targetId, propertyValue, ...rest } = params;
+    // Map targetId to gameObjectPath and propertyValue to value for component functions
+    const mappedParams = { ...rest, gameObjectPath: targetId, value: propertyValue };
     switch (action) {
       case 'search': return searchComponentTypes(rest as any);
-      case 'add': return addComponent(rest as any);
-      case 'set_properties': return setComponentProperties(rest as any);
-      case 'get_properties': return getComponentProperties(rest as any);
-      case 'set_property': return setComponentProperty(rest as any);
-      case 'compare': return compareComponents(rest as any);
+      case 'add': return addComponent(mappedParams as any);
+      case 'set_properties': return setComponentProperties(mappedParams as any);
+      case 'get_properties': return getComponentProperties(mappedParams as any);
+      case 'set_property': return setComponentProperty(mappedParams as any);
+      case 'compare': return compareComponents({ ...rest, gameObjectPath1: targetId, gameObjectPath2: (params as any).compareTargetId } as any);
       default: throw new Error(`Unknown action: ${action}`);
     }
   },
 
   // 6. unity_selection
   unity_selection: async (params) => {
-    const { action, ...rest } = params;
+    const { action, targetIds, ...rest } = params;
+    // Map targetIds to gameObjectPaths for selection functions
+    const mappedParams = { ...rest, gameObjectPaths: targetIds };
     switch (action) {
       case 'get': return getEditorSelection();
-      case 'set': return setEditorSelection(rest as any);
+      case 'set': return setEditorSelection(mappedParams as any);
       default: throw new Error(`Unknown action: ${action}`);
     }
   },
 
   // 7. unity_asset
   unity_asset: async (params) => {
-    const { action, ...rest } = params;
+    const { action, targetId, parentId, path, newPath, ...rest } = params;
     switch (action) {
       case 'search': return searchAssets(rest as any);
       case 'create_folder': return createFolder(rest as any);
-      case 'move': return moveAsset(rest as any);
-      case 'delete': return deleteAsset(rest as any);
-      case 'get_info': return getAssetInfo(rest as any);
-      case 'create_prefab': return createPrefab(rest as any);
-      case 'instantiate_prefab': return instantiatePrefab(rest as any);
+      case 'move': return moveAsset({ sourcePath: path, destinationPath: newPath, ...rest } as any);
+      case 'delete': return deleteAsset({ path, ...rest } as any);
+      case 'get_info': return getAssetInfo({ path, ...rest } as any);
+      case 'create_prefab': return createPrefab({ gameObjectPath: targetId, savePath: path, ...rest } as any);
+      case 'instantiate_prefab': return instantiatePrefab({ parentPath: parentId, ...rest } as any);
       default: throw new Error(`Unknown action: ${action}`);
     }
   },
 
   // 8. unity_material
   unity_material: async (params) => {
-    const { action, ...rest } = params;
+    const { action, targetId, propertyValue, ...rest } = params;
+    // Map targetId to gameObjectPath and propertyValue to value for material functions
+    const mappedParams = { ...rest, gameObjectPath: targetId, value: propertyValue };
     switch (action) {
-      case 'get_properties': return getMaterialProperties(rest as any);
-      case 'set_property': return setMaterialProperty(rest as any);
+      case 'get_properties': return getMaterialProperties(mappedParams as any);
+      case 'set_property': return setMaterialProperty(mappedParams as any);
       case 'list': return listMaterials(rest as any);
       case 'list_shaders': return listShaders();
       default: throw new Error(`Unknown action: ${action}`);
@@ -1119,11 +1125,13 @@ export const consolidatedToolHandlers: Record<string, (params: ToolParams) => Pr
 
   // 9. unity_prefab
   unity_prefab: async (params) => {
-    const { action, ...rest } = params;
+    const { action, targetId, ...rest } = params;
+    // Map targetId to gameObjectPath for prefab functions
+    const mappedParams = { ...rest, gameObjectPath: targetId };
     switch (action) {
-      case 'get_overrides': return getPrefabOverrides(rest as any);
-      case 'apply': return applyPrefabOverrides(rest as any);
-      case 'revert': return revertPrefabOverrides(rest as any);
+      case 'get_overrides': return getPrefabOverrides(mappedParams as any);
+      case 'apply': return applyPrefabOverrides(mappedParams as any);
+      case 'revert': return revertPrefabOverrides(mappedParams as any);
       case 'find_instances': return findPrefabInstances(rest as any);
       default: throw new Error(`Unknown action: ${action}`);
     }
@@ -1154,26 +1162,30 @@ export const consolidatedToolHandlers: Record<string, (params: ToolParams) => Pr
 
   // 12. unity_animation
   unity_animation: async (params) => {
-    const { action, ...rest } = params;
+    const { action, targetId, ...rest } = params;
+    // Map targetId to gameObjectPath for animation functions
+    const mappedParams = { ...rest, gameObjectPath: targetId };
     switch (action) {
-      case 'get_state': return getAnimatorState(rest as any);
-      case 'set_parameter': return setAnimatorParameter(rest as any);
-      case 'get_clips': return getAnimationClips(rest as any);
-      case 'play': return playAnimation(rest as any);
-      case 'sample': return sampleAnimation(rest as any);
+      case 'get_state': return getAnimatorState(mappedParams as any);
+      case 'set_parameter': return setAnimatorParameter(mappedParams as any);
+      case 'get_clips': return getAnimationClips(mappedParams as any);
+      case 'play': return playAnimation(mappedParams as any);
+      case 'sample': return sampleAnimation(mappedParams as any);
       default: throw new Error(`Unknown action: ${action}`);
     }
   },
 
   // 13. unity_audio
   unity_audio: async (params) => {
-    const { action, ...rest } = params;
+    const { action, targetId, ...rest } = params;
+    // Map targetId to gameObjectPath for audio functions
+    const mappedParams = { ...rest, gameObjectPath: targetId };
     switch (action) {
       case 'list_sources': return listAudioSources();
       case 'get_clip_info': return getAudioClipInfo(rest as any);
       case 'list_clips': return listAudioClips(rest as any);
       case 'preview': return previewAudio(rest as any);
-      case 'set_source': return setAudioSource(rest as any);
+      case 'set_source': return setAudioSource(mappedParams as any);
       default: throw new Error(`Unknown action: ${action}`);
     }
   },
