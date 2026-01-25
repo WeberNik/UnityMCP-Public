@@ -41,7 +41,9 @@ namespace UnityVision.Editor.Transport
         
         // Background keepalive to force Unity updates when unfocused
         private static Thread _keepaliveThread;
+        private static volatile bool _keepaliveRunning;
         private static volatile bool _hasPendingCommands;
+        private static int _needsEditorUpdate; // Use int for Interlocked operations (0=false, 1=true)
         private static DateTime _lastMainThreadActivity;
         
         // Thread-safe send lock
@@ -159,7 +161,8 @@ namespace UnityVision.Editor.Transport
         {
             if (_keepaliveThread != null && _keepaliveThread.IsAlive)
                 return;
-                
+            
+            _keepaliveRunning = true;
             _keepaliveThread = new Thread(KeepaliveLoop)
             {
                 IsBackground = true,
@@ -169,26 +172,54 @@ namespace UnityVision.Editor.Transport
         }
         
         /// <summary>
-        /// Background thread that forces Unity to update when there are pending commands
-        /// or when the main thread has been stale for too long
+        /// Stop the background keepalive thread
+        /// </summary>
+        private static void StopKeepaliveThread()
+        {
+            _keepaliveRunning = false;
+            
+            // Give the thread a moment to exit gracefully
+            if (_keepaliveThread != null && _keepaliveThread.IsAlive)
+            {
+                try
+                {
+                    // Wait up to 100ms for graceful exit
+                    if (!_keepaliveThread.Join(100))
+                    {
+                        // Thread didn't exit, but it's a background thread so it will die with the process
+                        FileLogger.Log("WARN", "WebSocketClient", "Keepalive thread did not exit gracefully");
+                    }
+                }
+                catch { /* ignore */ }
+            }
+            _keepaliveThread = null;
+        }
+        
+        /// <summary>
+        /// Background thread that sets a flag when Unity needs to update.
+        /// The actual Unity API calls happen on the main thread in Update().
         /// </summary>
         private static void KeepaliveLoop()
         {
-            while (true)
+            while (_keepaliveRunning)
             {
                 try
                 {
                     Thread.Sleep(500); // Check every 500ms
                     
+                    if (!_keepaliveRunning)
+                        break;
+                    
                     if (!_isConnected)
                         continue;
                     
-                    // Force update if we have pending commands OR main thread is stale
+                    // Check if we need to force an update
                     var timeSinceMainThread = (DateTime.Now - _lastMainThreadActivity).TotalSeconds;
                     
                     if (_hasPendingCommands || timeSinceMainThread > 2.0)
                     {
-                        ForceEditorUpdate();
+                        // Set flag atomically - main thread will handle the actual Unity API call
+                        Interlocked.Exchange(ref _needsEditorUpdate, 1);
                     }
                 }
                 catch (ThreadAbortException)
@@ -203,22 +234,22 @@ namespace UnityVision.Editor.Transport
         }
         
         /// <summary>
-        /// Force Unity Editor to process pending callbacks even when unfocused
+        /// Force Unity Editor to process pending callbacks even when unfocused.
+        /// MUST be called from main thread only!
         /// </summary>
         private static void ForceEditorUpdate()
         {
             try
             {
-                // More aggressive update forcing to ensure delayCall executes
-                // QueuePlayerLoopUpdate forces the editor to process pending callbacks
-                EditorApplication.QueuePlayerLoopUpdate();
-                
-                // RepaintAllViews forces UI updates which can trigger callback processing
-                InternalEditorUtility.RepaintAllViews();
+                // Only call Unity APIs from main thread
+                if (!EditorApplication.isPlayingOrWillChangePlaymode)
+                {
+                    InternalEditorUtility.RepaintAllViews();
+                }
             }
             catch
             {
-                // Ignore - may fail during shutdown
+                // Ignore - may fail during shutdown or play mode transition
             }
         }
         
@@ -280,6 +311,12 @@ namespace UnityVision.Editor.Transport
             // Track main thread activity for keepalive
             _lastMainThreadActivity = DateTime.Now;
             
+            // Handle editor update request from background thread (thread-safe with Interlocked)
+            if (Interlocked.Exchange(ref _needsEditorUpdate, 0) == 1)
+            {
+                ForceEditorUpdate();
+            }
+            
             // Periodic ping to keep connection alive
             if (_isConnected && (DateTime.Now - _lastPingTime).TotalMilliseconds > PING_INTERVAL_MS)
             {
@@ -315,6 +352,9 @@ namespace UnityVision.Editor.Transport
                 
                 FileLogger.Log("INFO", "WebSocketClient", "Connected to MCP server");
                 Debug.Log("[UnityVision] Connected to MCP server");
+                
+                // Restart keepalive thread if it was stopped
+                StartKeepaliveThread();
                 
                 // Start receive loop
                 _receiveThread = new Thread(ReceiveLoop) { IsBackground = true };
@@ -396,6 +436,9 @@ namespace UnityVision.Editor.Transport
                 _commandQueue.Clear();
                 _isProcessingCommand = false;
             }
+            
+            // Stop keepalive thread to prevent it from running during disconnected state
+            StopKeepaliveThread();
             
             FileLogger.Log("INFO", "WebSocketClient", "Disconnected from MCP server");
             OnDisconnected?.Invoke();

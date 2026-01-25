@@ -9,8 +9,6 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Threading;
-using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 using UnityVision.Editor.Bridge;
@@ -71,8 +69,8 @@ namespace UnityVision.Editor.Handlers
             "for\\s*\\(\\s*;\\s*;\\s*\\)",  // Infinite for loop
             "Thread.Sleep",
             "Task.Delay",
-            ".Wait\\(",
-            ".Result",  // Blocking async result access
+            "\\.Wait\\s*\\(",
+            "\\.Result\\s*[;,\\)\\]]",  // Blocking async result access (more specific to avoid false positives)
         };
         
         /// <summary>
@@ -188,10 +186,31 @@ namespace UnityVision.Editor.Handlers
             {
                 return RpcResponse.Failure("INVALID_PARAMS", "expression is required");
             }
+            
+            // Check if Unity is compiling - this can cause hangs
+            if (IsCompiling())
+            {
+                return RpcResponse.Success(new EvaluateExpressionResponse
+                {
+                    success = false,
+                    error = "Unity is currently compiling scripts. Please wait for compilation to finish before evaluating expressions."
+                });
+            }
+            
+            var expression = req.expression.Trim();
+            
+            // Check for known blocking patterns
+            var blockingWarning = CheckForBlockingPatterns(expression);
+            if (!string.IsNullOrEmpty(blockingWarning))
+            {
+                FileLogger.Log("WARN", "CodeExecution", $"EvaluateExpression: {blockingWarning}");
+            }
 
             try
             {
-                var result = EvaluateExpressionInternal(req.expression);
+                FileLogger.Log("INFO", "CodeExecution", $"Evaluating expression: {expression.Substring(0, Math.Min(100, expression.Length))}...");
+                
+                var result = EvaluateExpressionInternal(expression);
 
                 return RpcResponse.Success(new EvaluateExpressionResponse
                 {
@@ -202,6 +221,8 @@ namespace UnityVision.Editor.Handlers
             }
             catch (Exception ex)
             {
+                FileLogger.Log("ERROR", "CodeExecution", $"EvaluateExpression failed: {ex.Message}");
+                
                 return RpcResponse.Success(new EvaluateExpressionResponse
                 {
                     success = false,

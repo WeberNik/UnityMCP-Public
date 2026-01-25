@@ -1,12 +1,13 @@
-# Implementation Reality Check - Unity Focus & Command Queue Improvements
+# Implementation Reality Check - unity_code Hang Fixes & Play Mode Crash Fix
 
 **Date:** January 25, 2026  
-**Scope:** MCP command execution reliability improvements  
+**Scope:** Fix unity_code tool hanging + Unity crash on Play mode  
 **Files Modified:**
-- `Packages/com.unityvision.bridge/Editor/Transport/CommandDispatcher.cs`
 - `Packages/com.unityvision.bridge/Editor/Transport/WebSocketClient.cs`
-- `README.md`
-- `TESTING_FOCUS_IMPROVEMENTS.md` (new)
+- `Packages/com.unityvision.bridge/Editor/Handlers/CodeExecutionHandlers.cs`
+- `unity-mcp-server/src/websocketHub.ts`
+- `unity-mcp-server/src/tools/codeExecutionTools.ts`
+- `unity-mcp-server/src/tools/consolidatedTools.ts`
 
 ---
 
@@ -18,218 +19,190 @@
 | **Language** | C# (Unity), TypeScript (Node.js) | `*.cs`, `*.ts` files |
 | **Framework** | Unity Editor Package + Node.js MCP Server | `package.json`, `*.asmdef` |
 | **Runtime** | Unity Editor Extension + Node.js CLI | `[InitializeOnLoad]` attributes |
-| **Entry Points** | `WebSocketClient` static constructor, `server.ts main()` | Lines 108, 28 respectively |
+| **Entry Points** | `WebSocketClient` static constructor, `server.ts main()` | Lines 126, 26 respectively |
 | **Build System** | Unity Package Manager + npm | `package.json` files |
 
 ---
 
 ## Phase 1 — Reality Inventory
 
-### A) Changes Made - Verification
+### A) Original Issues
 
-#### 1. CommandDispatcher.cs Changes
+1. **unity_code tool hangs indefinitely** - Commands never appear in activity history
+2. **Unity crashes on Play mode** - After adding keepalive improvements
 
+### B) Root Causes Identified
+
+| Issue | Root Cause | Location |
+|-------|------------|----------|
+| Hang not visible | Activity recorded only after completion | `WebSocketClient.cs:849` |
+| Unity crash | `EditorApplication.QueuePlayerLoopUpdate()` called from background thread | `WebSocketClient.cs:214` (old) |
+| No compilation check | Code executed during Unity compilation | `CodeExecutionHandlers.cs:102` |
+| Port conflict crash | No fallback when port 6400 in use | `websocketHub.ts:141` |
+
+### C) Fixes Implemented
+
+#### Fix 1: Command Received Activity Entry
 | Feature | Status | Proof (File:Line) | Wired? |
 |---------|--------|-------------------|--------|
-| Unfocused detection | ✅ Implemented | `CommandDispatcher.cs:282-323` | ✅ Called from `ProcessQueue()` line 219 |
-| Timeout handling | ✅ Implemented | `CommandDispatcher.cs:329-369` | ✅ Called from `ProcessQueue()` line 222 |
-| Race condition fix | ✅ Implemented | `CommandDispatcher.cs:284-288` | ✅ Lock around `_pending.Count` |
-| Error isolation | ✅ Implemented | `CommandDispatcher.cs:249-275` | ✅ Try-catch per command |
-| Timeout constant | ✅ Implemented | `CommandDispatcher.cs:92` | ✅ `DefaultTimeoutSeconds = 30` |
-| Warning interval | ✅ Implemented | `CommandDispatcher.cs:93` | ✅ `UnfocusedWarningIntervalSeconds = 10` |
+| `[started]` activity entry | ✅ Implemented | `WebSocketClient.cs:756` | ✅ Called before execution |
+| Duration tracking | ✅ Implemented | `WebSocketClient.cs:878-879` | ✅ Actual duration recorded |
 
-#### 2. WebSocketClient.cs Changes
-
+#### Fix 2: Blocking Pattern Detection & Compilation Check
 | Feature | Status | Proof (File:Line) | Wired? |
 |---------|--------|-------------------|--------|
-| Command queue class | ✅ Implemented | `WebSocketClient.cs:79-86` | ✅ `QueuedCommand` class |
-| Queue data structure | ✅ Implemented | `WebSocketClient.cs:72` | ✅ `Queue<QueuedCommand>` |
-| Queue lock | ✅ Implemented | `WebSocketClient.cs:73` | ✅ `_queueLock` object |
-| Processing flag | ✅ Implemented | `WebSocketClient.cs:74` | ✅ `_isProcessingCommand` |
-| QueueCommand method | ✅ Implemented | `WebSocketClient.cs:614-640` | ✅ Called from `ProcessMessage()` line 593 |
-| ProcessNextCommand | ✅ Implemented | `WebSocketClient.cs:646-665` | ✅ Called via `delayCall` |
-| ExecuteCommandAsync | ✅ Implemented | `WebSocketClient.cs:671-801` | ✅ Called from `ProcessNextCommand()` |
-| Next command scheduling | ✅ Implemented | `WebSocketClient.cs:800-801` | ✅ `delayCall += ProcessNextCommand` |
+| `BlockingPatterns` array | ✅ Implemented | `CodeExecutionHandlers.cs:61-74` | ✅ Used in `CheckForBlockingPatterns()` |
+| `IsCompiling()` check | ✅ Implemented | `CodeExecutionHandlers.cs:79-82` | ✅ Called in `ExecuteCode()` line 112 |
+| `CheckForBlockingPatterns()` | ✅ Implemented | `CodeExecutionHandlers.cs:87-98` | ✅ Called in `ExecuteCode()` line 125 |
+| EvaluateExpression checks | ✅ Implemented | `CodeExecutionHandlers.cs:190-207` | ✅ Same checks as ExecuteCode |
+| Logging | ✅ Implemented | `CodeExecutionHandlers.cs:144,155,171` | ✅ Start/complete/error logged |
 
-#### 3. README.md Changes
-
+#### Fix 3: Thread-Safe Keepalive
 | Feature | Status | Proof (File:Line) | Wired? |
 |---------|--------|-------------------|--------|
-| Important Notes section | ✅ Implemented | `README.md:550-596` | ✅ Visible in docs |
-| Focus requirement docs | ✅ Implemented | `README.md:552-579` | ✅ Complete explanation |
-| Compilation docs | ✅ Implemented | `README.md:581-595` | ✅ Workarounds included |
+| `_keepaliveRunning` flag | ✅ Implemented | `WebSocketClient.cs:44` | ✅ Controls thread lifecycle |
+| `_needsEditorUpdate` as int | ✅ Implemented | `WebSocketClient.cs:46` | ✅ For `Interlocked.Exchange` |
+| `StopKeepaliveThread()` | ✅ Implemented | `WebSocketClient.cs:177-196` | ✅ Called in `Disconnect()` line 438 |
+| `Interlocked.Exchange` | ✅ Implemented | `WebSocketClient.cs:222,315` | ✅ Thread-safe flag operations |
+| Play mode check | ✅ Implemented | `WebSocketClient.cs:248` | ✅ `isPlayingOrWillChangePlaymode` |
+| Restart on reconnect | ✅ Implemented | `WebSocketClient.cs:357` | ✅ Called in `ConnectAsync()` |
+
+#### Fix 4: Port Fallback Logic
+| Feature | Status | Proof (File:Line) | Wired? |
+|---------|--------|-------------------|--------|
+| Port retry loop | ✅ Implemented | `websocketHub.ts:147-172` | ✅ Tries ports 6400-6409 |
+| EADDRINUSE detection | ✅ Implemented | `websocketHub.ts:163` | ✅ Only retries on port conflict |
+| Graceful degradation | ✅ Implemented | `websocketHub.ts:174-182` | ✅ Runs in disconnected mode |
+
+#### Fix 5: Documentation Warnings
+| Feature | Status | Proof (File:Line) | Wired? |
+|---------|--------|-------------------|--------|
+| `execute_code` warning | ✅ Implemented | `codeExecutionTools.ts:39-46` | ✅ In tool description |
+| `unity_code` warning | ✅ Implemented | `consolidatedTools.ts:833-840` | ✅ In tool description |
 
 ---
 
-## A. Audit Summary Table
+## Phase 2 — Discrepancy Report
 
-| Area | Status | Issue Description | Proposed Fix |
-|------|--------|-------------------|--------------|
-| **Requirements Compliance** | ✅ OK | All requirements implemented | None |
-| **Sequential Execution** | ✅ OK | Commands now queued and processed one-by-one | None |
-| **Error Handling** | ✅ OK | Try-catch around each command | None |
-| **Race Conditions** | ✅ OK | Proper locking implemented | None |
-| **Timeout Handling** | ✅ OK | 30-second timeout with clear messages | None |
-| **Unfocused Warning** | ✅ OK | Periodic warnings when Unity unfocused | None |
-| **Documentation** | ✅ OK | README updated with focus requirement | None |
-| **Thread Safety** | ✅ FIXED | `_isProcessingCommand` now volatile | `WebSocketClient.cs:74` |
-| **Queue Cleanup** | ✅ FIXED | Queue cleared on disconnect | `WebSocketClient.cs:393-398` |
-| **Timeout in Queue** | ✅ FIXED | Queue-level timeout added | `WebSocketClient.cs:670-696` |
+| # | Category | Expected | Actual | Impact | Fix Status |
+|---|----------|----------|--------|--------|------------|
+| 1 | Built but not wired | N/A | N/A | N/A | ✅ All wired |
+| 2 | Reachable but incomplete | EvaluateExpression has same checks as ExecuteCode | Now has same checks | User-facing | ✅ Fixed |
+| 3 | Thread safety | Interlocked for flag operations | Now uses Interlocked | Internal | ✅ Fixed |
+| 4 | Thread lifecycle | Keepalive stops on disconnect | Now stops properly | Internal | ✅ Fixed |
+| 5 | Regex false positives | `.Result` too broad | Now more specific | User-facing | ✅ Fixed |
 
 ---
 
-## B. Detailed Explanations
+## Phase 3 — All Fixes Applied
 
-### Issue 1: `_isProcessingCommand` Thread Safety
+### File: `WebSocketClient.cs`
+| Line(s) | Change |
+|---------|--------|
+| 44 | Added `_keepaliveRunning` volatile flag |
+| 46 | Changed `_needsEditorUpdate` to `int` for Interlocked |
+| 165 | Set `_keepaliveRunning = true` in `StartKeepaliveThread()` |
+| 177-196 | Added `StopKeepaliveThread()` method |
+| 204 | Changed loop condition to `while (_keepaliveRunning)` |
+| 210-211 | Added early exit check for `_keepaliveRunning` |
+| 222 | Use `Interlocked.Exchange` to set flag |
+| 248 | Added `isPlayingOrWillChangePlaymode` check |
+| 315 | Use `Interlocked.Exchange` to read/clear flag |
+| 357 | Call `StartKeepaliveThread()` on reconnect |
+| 438 | Call `StopKeepaliveThread()` on disconnect |
+| 756 | Record `[started]` activity entry |
+| 878-879 | Record actual duration on completion |
 
-**Location:** `WebSocketClient.cs:74`
+### File: `CodeExecutionHandlers.cs`
+| Line(s) | Change |
+|---------|--------|
+| 6-14 | Removed unused `System.Threading.Tasks` import |
+| 61-74 | Added `BlockingPatterns` array |
+| 72-73 | Made `.Wait` and `.Result` patterns more specific |
+| 79-82 | Added `IsCompiling()` method |
+| 87-98 | Added `CheckForBlockingPatterns()` method |
+| 112-120 | Added compilation check in `ExecuteCode()` |
+| 125 | Call `CheckForBlockingPatterns()` |
+| 144,155,171 | Added logging for execution lifecycle |
+| 190-207 | Added same checks to `EvaluateExpression()` |
+| 211,224 | Added logging to `EvaluateExpression()` |
 
-**Problem:** The `_isProcessingCommand` flag is accessed from multiple threads (main thread via `delayCall` and potentially the receive thread) but is not marked as `volatile`.
+### File: `websocketHub.ts`
+| Line(s) | Change |
+|---------|--------|
+| 147-182 | Replaced single-port start with retry loop (6400-6409) |
 
-**Current Code:**
-```csharp
-private static bool _isProcessingCommand = false;
+### File: `codeExecutionTools.ts`
+| Line(s) | Change |
+|---------|--------|
+| 39-46 | Added blocking pattern warnings to description |
+
+### File: `consolidatedTools.ts`
+| Line(s) | Change |
+|---------|--------|
+| 831-840 | Added blocking pattern warnings to `unity_code` description |
+
+---
+
+## Phase 4 — Verification
+
+### Build Verification Commands
+
+**Unity Package (C#):**
+```bash
+# Unity will compile automatically when files change
+# Check Unity Console for compilation errors
 ```
 
-**Risk:** Compiler optimizations could cache the value, leading to race conditions where multiple `ProcessNextCommand` calls could be scheduled.
-
-**Fix:** Add `volatile` keyword:
-```csharp
-private static volatile bool _isProcessingCommand = false;
+**MCP Server (TypeScript):**
+```bash
+cd unity-mcp-server
+npm run build
 ```
 
----
+### Expected Success Criteria
 
-### Issue 2: Queue Not Cleared on Disconnect
-
-**Location:** `WebSocketClient.cs:361-394` (Disconnect method)
-
-**Problem:** When `Disconnect()` is called, the `_commandQueue` is not cleared. This could lead to stale commands being processed after reconnection.
-
-**Current Code:** Only clears `_pendingCommands`, not `_commandQueue`.
-
-**Fix:** Add queue cleanup in `Disconnect()`:
-```csharp
-// Clear command queue
-lock (_queueLock)
-{
-    _commandQueue.Clear();
-    _isProcessingCommand = false;
-}
-```
+| Check | Expected Result |
+|-------|-----------------|
+| Unity compiles | No errors in Console |
+| `npm run build` | Exit code 0, no TypeScript errors |
+| Play mode | Unity doesn't crash |
+| unity_code tool | Shows `[started]` in activity immediately |
+| Blocking code | Warning in output, still executes |
+| During compilation | Returns error "Unity is currently compiling" |
+| Port conflict | Server tries next port, logs message |
 
 ---
 
-### Issue 3: Queued Commands Don't Have Timeout
+## Phase 5 — Remaining Gaps
 
-**Location:** `WebSocketClient.cs:614-640` (QueueCommand method)
+| Item | Status | Reason |
+|------|--------|--------|
+| True timeout cancellation | Deferred | C# main thread code cannot be cancelled mid-execution |
+| Activity entry consolidation | Deferred | Low priority, current approach works |
+| Port alignment (6400 vs 7890) | Decision Needed | README says 7890, code uses 6400 |
 
-**Problem:** Commands are queued with `QueuedAt` timestamp but there's no timeout check for commands waiting in the queue. If many commands queue up, early ones could wait indefinitely.
+### Decision Needed: Port Default
 
-**Current Code:** No timeout check in queue.
+**Options:**
+1. Keep 6400 (current) - Update README
+2. Change to 7890 - Update code
+3. Keep both, document environment variable override
 
-**Recommendation:** Add timeout check in `ProcessNextCommand()`:
-```csharp
-// Check if command has been waiting too long
-var waitTime = (DateTime.Now - command.QueuedAt).TotalSeconds;
-if (waitTime > 30)
-{
-    // Send timeout error and skip to next
-    // ...
-}
-```
+**Recommendation:** Option 1 - Keep 6400, update README if needed.
 
 ---
 
-### Issue 4: CommandDispatcher Still Used?
+## Conclusion
 
-**Location:** `CommandDispatcher.cs`
+**Overall Status:** ✅ **ALL FIXES IMPLEMENTED**
 
-**Question:** After the WebSocketClient changes, is `CommandDispatcher` still used? 
-
-**Analysis:** 
-- `CommandDispatcher` is used by `RpcHandler` for internal command dispatching
-- `WebSocketClient` now handles WebSocket commands directly
-- Both paths exist and are valid
-
-**Status:** ✅ OK - Both paths serve different purposes.
-
----
-
-## C. Actionable Fix Plan
-
-### Priority 1: Critical (Must Fix)
-
-1. **Add `volatile` to `_isProcessingCommand`**
-   - File: `WebSocketClient.cs:74`
-   - Change: `private static bool` → `private static volatile bool`
-   - Risk if not fixed: Race condition causing duplicate processing
-
-2. **Clear queue on disconnect**
-   - File: `WebSocketClient.cs` in `Disconnect()` method
-   - Add: Queue clearing logic
-   - Risk if not fixed: Stale commands after reconnect
-
-### Priority 2: Important (Should Fix)
-
-3. **Add queue-level timeout**
-   - File: `WebSocketClient.cs` in `ProcessNextCommand()`
-   - Add: Timeout check for queued commands
-   - Risk if not fixed: Commands waiting indefinitely in queue
-
-### Priority 3: Nice to Have
-
-4. **Add queue size logging**
-   - File: `WebSocketClient.cs`
-   - Add: Periodic logging of queue size for debugging
-
-5. **Add queue size limit**
-   - File: `WebSocketClient.cs`
-   - Add: Maximum queue size to prevent memory issues
-
----
-
-## D. Test Verification Checklist
-
-| Test | Expected Result | How to Verify |
-|------|-----------------|---------------|
-| Sequential execution | Commands execute one-by-one | Check Unity Console logs for order |
-| Parallel tool calls | All complete without hanging | Call 3+ tools in parallel from MCP |
-| Unfocused warning | Warning appears in Console | Unfocus Unity, run MCP command |
-| Timeout error | Clear error after 30s | Unfocus Unity for 30+ seconds |
-| Disconnect cleanup | Queue cleared | Disconnect and check no stale commands |
-| Reconnect behavior | Fresh queue | Reconnect and verify clean state |
-
----
-
-## E. Files Changed Summary
-
-| File | Lines Added | Lines Modified | Lines Removed |
-|------|-------------|----------------|---------------|
-| `CommandDispatcher.cs` | ~100 | ~10 | 0 |
-| `WebSocketClient.cs` | ~80 | ~5 | 0 |
-| `README.md` | ~50 | 0 | 0 |
-| `TESTING_FOCUS_IMPROVEMENTS.md` | ~120 (new) | 0 | 0 |
-
----
-
-## F. Conclusion
-
-**Overall Status:** ✅ **COMPLETE** - All issues addressed
-
-The implementation successfully addresses:
-1. ✅ Unity focus requirement documentation
-2. ✅ Timeout handling with clear error messages
-3. ✅ Sequential command execution (no more parallel hangs)
-4. ✅ Error isolation (one command failure doesn't block others)
-5. ✅ Unfocused state detection and warnings
-6. ✅ Thread safety with volatile flag
-7. ✅ Queue cleanup on disconnect
-8. ✅ Queue-level timeout (30 seconds)
-
-**All Issues Fixed:**
-1. ✅ Added `volatile` keyword to `_isProcessingCommand` (`WebSocketClient.cs:74`)
-2. ✅ Added queue cleanup in `Disconnect()` (`WebSocketClient.cs:393-398`)
-3. ✅ Added queue-level timeout check (`WebSocketClient.cs:670-696`)
+| Original Issue | Resolution |
+|----------------|------------|
+| unity_code hangs invisibly | Now shows `[started]` entry immediately |
+| Unity crashes on Play | Thread-safe keepalive, no Unity API from background thread |
+| No blocking code warning | Detects and warns about blocking patterns |
+| No compilation check | Refuses to run during compilation |
+| Port conflict crashes server | Tries 10 ports, graceful degradation |
 
 **Ready for Testing**
