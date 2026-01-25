@@ -133,6 +133,34 @@ Unzip it anywhere, then point your MCP client at:
 
 > **Note:** Node.js is still required to run the server.
 
+### Optional: Unity Menu Helpers (Install/Rebuild MCP Server)
+
+Unity includes two convenience menu items to set up the Node.js MCP server for you:
+
+- `Window > UnityVision > Install MCP Server`  
+  Prompts for the `unity-mcp-server` folder, then runs `npm install` (if needed) and `npm run build`.
+- `Window > UnityVision > Rebuild MCP Server`  
+  Deletes `dist/` and runs `npm run build` using the previously saved server path.
+
+These helpers follow the same prerequisites as **Option A** above and are not required if you use the **prebuilt server**.
+
+**If something fails, Unity will log an error and you can fix it like this:**
+- **Node/npm not installed or not on PATH**  
+  Error: `npm is not available. Please install Node.js.`  
+  Fix: Install Node.js 18+ and restart Unity, then try again.
+- **MCP server path not set**  
+  Error: `MCP server path not configured.`  
+  Fix: Run **Install MCP Server** and select the `unity-mcp-server` folder, or set the path in `Window > UnityVision > Bridge Status`.
+- **Wrong folder selected (missing package.json)**  
+  Error: `No package.json found at ...`  
+  Fix: Select the actual `unity-mcp-server` folder (the one that contains `package.json`).
+- **npm install/build fails**  
+  Fix: Check the Unity Console and `Logs/UnityVision_Debug.log`, then run the commands manually in that folder:
+  ```bash
+  npm install
+  npm run build
+  ```
+
 ### Step 4: Configure Your AI Client
 
 You need to tell your AI client where to find the MCP server. The easiest way is to use the **built-in config generator** in Unity:
