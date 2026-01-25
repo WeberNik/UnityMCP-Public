@@ -30,6 +30,19 @@ namespace UnityVision.Editor.Bridge
         public static string PipeName { get; private set; }
         public static bool IsRunning => _isRunning;
         
+        // Thread-safe request queue for main thread execution
+        // This avoids calling EditorApplication.delayCall from background threads
+        private class PendingRequest
+        {
+            public RpcRequest Request;
+            public RpcResponse Response;
+            public ManualResetEvent WaitHandle;
+            public string RequestId;
+            public DateTime StartTime;
+        }
+        private static readonly Queue<PendingRequest> _pendingRequests = new Queue<PendingRequest>();
+        private static readonly object _requestQueueLock = new object();
+        
         // Activity tracking
         private static List<RequestActivity> _recentActivity = new List<RequestActivity>();
         private static readonly object _activityLock = new object();
@@ -50,6 +63,49 @@ namespace UnityVision.Editor.Bridge
             Start();
             EditorApplication.quitting += Stop;
             AssemblyReloadEvents.beforeAssemblyReload += Stop;
+            
+            // Register for main thread updates to process queued requests
+            EditorApplication.update += ProcessPendingRequests;
+        }
+        
+        /// <summary>
+        /// Process pending requests on the main thread.
+        /// This is called via EditorApplication.update (main thread only).
+        /// </summary>
+        private static void ProcessPendingRequests()
+        {
+            while (true)
+            {
+                PendingRequest pending = null;
+                lock (_requestQueueLock)
+                {
+                    if (_pendingRequests.Count == 0)
+                        break;
+                    pending = _pendingRequests.Dequeue();
+                }
+                
+                if (pending != null)
+                {
+                    FileLogger.LogRequestPhase(pending.RequestId, "MAIN_THREAD_EXECUTING", 
+                        $"Elapsed: {(DateTime.Now - pending.StartTime).TotalMilliseconds}ms");
+                    try
+                    {
+                        pending.Response = RpcHandler.HandleRequest(pending.Request);
+                        FileLogger.LogRequestPhase(pending.RequestId, "HANDLER_COMPLETED", 
+                            $"HasError: {pending.Response?.Error != null}");
+                    }
+                    catch (Exception ex)
+                    {
+                        FileLogger.LogError("PipeBridge", $"Handler exception for {pending.RequestId}: {ex.Message}", ex);
+                        pending.Response = RpcResponse.Failure("INTERNAL_ERROR", ex.Message);
+                    }
+                    finally
+                    {
+                        FileLogger.LogRequestPhase(pending.RequestId, "SIGNALING_WAIT_HANDLE");
+                        pending.WaitHandle.Set();
+                    }
+                }
+            }
         }
         
         /// <summary>
@@ -171,7 +227,9 @@ namespace UnityVision.Editor.Bridge
                 {
                     if (_isRunning)
                     {
-                        Debug.LogWarning($"[UnityVision] Pipe accept error: {ex.Message}");
+                        // Use FileLogger instead of Debug.LogWarning - thread-safe
+                        // DO NOT call Unity APIs from background threads!
+                        FileLogger.Log("WARN", "NamedPipeBridge", $"Pipe accept error: {ex.Message}");
                     }
                     pipeServer?.Close();
                 }
@@ -207,7 +265,9 @@ namespace UnityVision.Editor.Bridge
             {
                 if (_isRunning)
                 {
-                    Debug.LogWarning($"[UnityVision] Client handler error: {ex.Message}");
+                    // Use FileLogger instead of Debug.LogWarning - thread-safe
+                    // DO NOT call Unity APIs from background threads!
+                    FileLogger.Log("WARN", "NamedPipeBridge", $"Client handler error: {ex.Message}");
                 }
             }
             finally
@@ -249,35 +309,27 @@ namespace UnityVision.Editor.Bridge
                 FileLogger.LogRequestStart(requestId, methodName);
                 FileLogger.LogRequestPhase(requestId, "PARSED", $"Method: {methodName}");
                 
-                // Execute on main thread
-                RpcResponse response = null;
-                var waitHandle = new ManualResetEvent(false);
-                bool delayCallScheduled = false;
+                // Queue request for main thread execution (THREAD-SAFE)
+                // DO NOT call EditorApplication.delayCall from background thread!
+                var pending = new PendingRequest
+                {
+                    Request = request,
+                    Response = null,
+                    WaitHandle = new ManualResetEvent(false),
+                    RequestId = requestId,
+                    StartTime = startTime
+                };
                 
                 FileLogger.LogRequestPhase(requestId, "SCHEDULING_MAIN_THREAD");
                 
-                EditorApplication.delayCall += () =>
+                lock (_requestQueueLock)
                 {
-                    FileLogger.LogRequestPhase(requestId, "MAIN_THREAD_EXECUTING", $"Elapsed: {(DateTime.Now - startTime).TotalMilliseconds}ms");
-                    try
-                    {
-                        response = RpcHandler.HandleRequest(request);
-                        FileLogger.LogRequestPhase(requestId, "HANDLER_COMPLETED", $"HasError: {response?.Error != null}");
-                    }
-                    catch (Exception ex)
-                    {
-                        FileLogger.LogError("PipeBridge", $"Handler exception for {requestId}: {ex.Message}", ex);
-                        response = RpcResponse.Failure("INTERNAL_ERROR", ex.Message);
-                    }
-                    finally
-                    {
-                        FileLogger.LogRequestPhase(requestId, "SIGNALING_WAIT_HANDLE");
-                        waitHandle.Set();
-                    }
-                };
-                delayCallScheduled = true;
+                    _pendingRequests.Enqueue(pending);
+                }
                 
-                FileLogger.LogRequestPhase(requestId, "DELAY_CALL_SCHEDULED", $"Waiting for main thread...");
+                FileLogger.LogRequestPhase(requestId, "REQUEST_QUEUED", $"Waiting for main thread...");
+                
+                var waitHandle = pending.WaitHandle;
                 
                 // Wait for main thread execution (with timeout)
                 // Log every 5 seconds while waiting
@@ -293,18 +345,24 @@ namespace UnityVision.Editor.Bridge
                         break;
                     }
                     waitedMs += checkIntervalMs;
+                    // DO NOT access EditorApplication properties from background thread!
+                    // Just log the wait time without Unity API calls
                     FileLogger.Log("WARN", "PipeBridge", $"STILL_WAITING {requestId} - {waitedMs}ms elapsed", 
-                        $"IsCompiling: {EditorApplication.isCompiling}, IsPlaying: {EditorApplication.isPlaying}");
+                        "Main thread may be blocked or Unity unfocused");
                 }
                 
-                if (waitedMs >= maxWaitMs && response == null)
+                if (waitedMs >= maxWaitMs && pending.Response == null)
                 {
-                    FileLogger.LogRequestEnd(requestId, methodName, maxWaitMs, false, "TIMEOUT - Main thread never executed delayCall");
+                    FileLogger.LogRequestEnd(requestId, methodName, maxWaitMs, false, "TIMEOUT - Main thread never executed request");
                     RecordActivity(methodName, maxWaitMs, false, "Timeout");
+                    // DO NOT access EditorApplication properties from background thread!
                     return JsonUtility.ToJson(RpcResponse.Failure("TIMEOUT", 
                         $"Request timed out waiting for Unity main thread after {maxWaitMs}ms. " +
-                        $"IsCompiling: {EditorApplication.isCompiling}, IsPlaying: {EditorApplication.isPlaying}"));
+                        "Unity may be compiling, in play mode, or unfocused."));
                 }
+                
+                // Get response from pending request
+                var response = pending.Response;
                 
                 // Record activity
                 int durationMs = (int)(DateTime.Now - startTime).TotalMilliseconds;

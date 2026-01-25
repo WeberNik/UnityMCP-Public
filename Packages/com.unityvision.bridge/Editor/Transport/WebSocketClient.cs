@@ -75,6 +75,13 @@ namespace UnityVision.Editor.Transport
         private static readonly object _queueLock = new object();
         private static volatile bool _isProcessingCommand = false;
         
+        // Thread-safe message queue for processing on main thread
+        // This avoids calling EditorApplication.delayCall from background threads
+        private static readonly Queue<string> _pendingMessages = new Queue<string>();
+        private static readonly object _messageLock = new object();
+        private static volatile bool _needsReconnect = false;
+        private static volatile bool _connectionLost = false;
+        
         /// <summary>
         /// Represents a queued command waiting for execution
         /// </summary>
@@ -317,11 +324,53 @@ namespace UnityVision.Editor.Transport
                 ForceEditorUpdate();
             }
             
+            // Process pending messages from background thread (MAIN THREAD ONLY)
+            ProcessPendingMessages();
+            
+            // Handle connection lost flag (set by background thread)
+            if (_connectionLost)
+            {
+                _connectionLost = false;
+                Debug.LogWarning("[UnityVision] Connection to MCP server lost. Reconnecting...");
+                ConnectAsync();
+            }
+            
+            // Handle reconnect request from background thread
+            if (_needsReconnect)
+            {
+                _needsReconnect = false;
+                ConnectAsync();
+            }
+            
             // Periodic ping to keep connection alive
             if (_isConnected && (DateTime.Now - _lastPingTime).TotalMilliseconds > PING_INTERVAL_MS)
             {
                 _ = SendPingAsync();
                 _lastPingTime = DateTime.Now;
+            }
+        }
+        
+        /// <summary>
+        /// Process pending messages queued by background threads.
+        /// This runs on the main thread via EditorApplication.update.
+        /// </summary>
+        private static void ProcessPendingMessages()
+        {
+            // Process all pending messages
+            while (true)
+            {
+                string message = null;
+                lock (_messageLock)
+                {
+                    if (_pendingMessages.Count == 0)
+                        break;
+                    message = _pendingMessages.Dequeue();
+                }
+                
+                if (message != null)
+                {
+                    ProcessMessage(message);
+                }
             }
         }
         
@@ -382,10 +431,12 @@ namespace UnityVision.Editor.Transport
                     }
                     
                     // Use Task.Delay instead of Thread.Sleep to not block
+                    // Set flag for main thread to handle reconnect (THREAD-SAFE)
+                    // DO NOT call EditorApplication.delayCall from Task.Run!
                     Task.Run(async () =>
                     {
                         await Task.Delay(delay);
-                        EditorApplication.delayCall += () => ConnectAsync();
+                        _needsReconnect = true;
                     });
                 }
                 else
@@ -586,9 +637,12 @@ namespace UnityVision.Editor.Transport
                         // Signal that we have pending commands - triggers keepalive to force update
                         _hasPendingCommands = true;
                         
-                        // Process on main thread
-                        var message = json;
-                        EditorApplication.delayCall += () => ProcessMessage(message);
+                        // Queue message for main thread processing (THREAD-SAFE)
+                        // DO NOT call EditorApplication.delayCall from background thread!
+                        lock (_messageLock)
+                        {
+                            _pendingMessages.Enqueue(json);
+                        }
                     }
                 }
             }
@@ -598,17 +652,13 @@ namespace UnityVision.Editor.Transport
                 FileLogger.Log("ERROR", "WebSocketClient", $"Receive error: {ex.Message}");
             }
             
-            // Connection lost - trigger reconnect
+            // Connection lost - trigger reconnect via flag (THREAD-SAFE)
+            // DO NOT call EditorApplication.delayCall or Debug.Log from background thread!
             if (_isConnected)
             {
                 _isConnected = false;
-                OnDisconnected?.Invoke();
-                
-                EditorApplication.delayCall += () =>
-                {
-                    Debug.LogWarning("[UnityVision] Connection to MCP server lost. Reconnecting...");
-                    ConnectAsync();
-                };
+                // Set flag - main thread Update() will handle reconnect and logging
+                _connectionLost = true;
             }
         }
         

@@ -200,9 +200,51 @@ npm run build
 | Original Issue | Resolution |
 |----------------|------------|
 | unity_code hangs invisibly | Now shows `[started]` entry immediately |
-| Unity crashes on Play | Thread-safe keepalive, no Unity API from background thread |
+| Unity crashes on Play | Thread-safe message queues, no Unity API from background thread |
 | No blocking code warning | Detects and warns about blocking patterns |
 | No compilation check | Refuses to run during compilation |
 | Port conflict crashes server | Tries 10 ports, graceful degradation |
+
+---
+
+## Update: Additional Thread Safety Fixes (Jan 25, 2026)
+
+### Root Cause of Remaining Crash
+Unity was still crashing on Play because `EditorApplication.delayCall +=` was being called from background threads in multiple locations:
+
+1. `WebSocketClient.cs:591` - ReceiveLoop calling delayCall
+2. `WebSocketClient.cs:607` - ReceiveLoop reconnect path
+3. `WebSocketClient.cs:388` - Task.Run reconnect path
+4. `NamedPipeBridge.cs:263` - ProcessRequest calling delayCall
+5. `NamedPipeBridge.cs:174,210` - Debug.LogWarning from background threads
+
+### Fixes Applied
+
+#### WebSocketClient.cs
+| Line(s) | Change |
+|---------|--------|
+| 78-83 | Added `_pendingMessages` queue and `_connectionLost`/`_needsReconnect` flags |
+| 327-375 | Added `ProcessPendingMessages()` method and flag handling in `Update()` |
+| 638-643 | Changed from `delayCall +=` to queue-based message passing |
+| 653-659 | Changed from `delayCall +=` to `_connectionLost` flag |
+| 433-439 | Changed from `delayCall +=` to `_needsReconnect` flag |
+
+#### NamedPipeBridge.cs
+| Line(s) | Change |
+|---------|--------|
+| 33-44 | Added `PendingRequest` class and `_pendingRequests` queue |
+| 67-68 | Register `ProcessPendingRequests()` with `EditorApplication.update` |
+| 75-109 | Added `ProcessPendingRequests()` method for main thread execution |
+| 174-177 | Changed `Debug.LogWarning` to `FileLogger.Log` |
+| 212-215 | Changed `Debug.LogWarning` to `FileLogger.Log` |
+| 300-332 | Changed from `delayCall +=` to queue-based request handling |
+| 348-351 | Removed `EditorApplication.isCompiling/isPlaying` access from background thread |
+| 358-361 | Removed `EditorApplication.isCompiling/isPlaying` access from timeout message |
+
+### Thread Safety Pattern Used
+Instead of calling Unity APIs from background threads, we now use:
+1. **Thread-safe queues** - Background threads enqueue data
+2. **Volatile flags** - Background threads set flags
+3. **Main thread polling** - `EditorApplication.update` processes queues and flags
 
 **Ready for Testing**
