@@ -68,6 +68,23 @@ namespace UnityVision.Editor.Transport
             new Dictionary<string, TaskCompletionSource<JObject>>();
         private static readonly object _lock = new object();
         
+        // Command queue for sequential execution
+        private static readonly Queue<QueuedCommand> _commandQueue = new Queue<QueuedCommand>();
+        private static readonly object _queueLock = new object();
+        private static volatile bool _isProcessingCommand = false;
+        
+        /// <summary>
+        /// Represents a queued command waiting for execution
+        /// </summary>
+        private class QueuedCommand
+        {
+            public string Id { get; set; }
+            public string Name { get; set; }
+            public JObject Parameters { get; set; }
+            public JObject OriginalMessage { get; set; }
+            public DateTime QueuedAt { get; set; }
+        }
+        
         // Events
         public static event Action OnConnected;
         public static event Action OnDisconnected;
@@ -373,6 +390,13 @@ namespace UnityVision.Editor.Transport
                 _pendingCommands.Clear();
             }
             
+            // Clear command queue to prevent stale commands after reconnection
+            lock (_queueLock)
+            {
+                _commandQueue.Clear();
+                _isProcessingCommand = false;
+            }
+            
             FileLogger.Log("INFO", "WebSocketClient", "Disconnected from MCP server");
             OnDisconnected?.Invoke();
         }
@@ -573,7 +597,7 @@ namespace UnityVision.Editor.Transport
                         break;
                         
                     case "execute":
-                        HandleExecuteCommand(message);
+                        QueueCommand(message);
                         break;
                         
                     case "pong":
@@ -592,13 +616,98 @@ namespace UnityVision.Editor.Transport
         }
         
         /// <summary>
-        /// Handle an execute command from the MCP server
+        /// Queue a command for sequential execution
         /// </summary>
-        private static async void HandleExecuteCommand(JObject message)
+        private static void QueueCommand(JObject message)
         {
             var commandId = message["id"]?.ToString();
             var commandName = message["name"]?.ToString();
             var parameters = message["params"] as JObject ?? new JObject();
+            
+            var queuedCommand = new QueuedCommand
+            {
+                Id = commandId,
+                Name = commandName,
+                Parameters = parameters,
+                OriginalMessage = message,
+                QueuedAt = DateTime.Now
+            };
+            
+            lock (_queueLock)
+            {
+                _commandQueue.Enqueue(queuedCommand);
+                FileLogger.Log("INFO", "WebSocketClient", $"Queued command: {commandName} ({commandId}). Queue size: {_commandQueue.Count}");
+                
+                // If not already processing, start processing
+                if (!_isProcessingCommand)
+                {
+                    _isProcessingCommand = true;
+                    EditorApplication.delayCall += ProcessNextCommand;
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Process the next command in the queue
+        /// </summary>
+        private static void ProcessNextCommand()
+        {
+            QueuedCommand command = null;
+            
+            lock (_queueLock)
+            {
+                if (_commandQueue.Count == 0)
+                {
+                    _isProcessingCommand = false;
+                    return;
+                }
+                
+                command = _commandQueue.Dequeue();
+            }
+            
+            if (command != null)
+            {
+                // Check if command has been waiting too long in queue (30 second timeout)
+                var waitTime = (DateTime.Now - command.QueuedAt).TotalSeconds;
+                if (waitTime > 30)
+                {
+                    FileLogger.Log("WARN", "WebSocketClient", 
+                        $"Command {command.Name} ({command.Id}) timed out after {waitTime:F1}s in queue");
+                    
+                    // Send timeout error back to MCP server
+                    var timeoutResult = new JObject
+                    {
+                        ["type"] = "command_result",
+                        ["id"] = command.Id,
+                        ["error"] = new JObject
+                        {
+                            ["code"] = "QUEUE_TIMEOUT",
+                            ["message"] = $"Command '{command.Name}' timed out after {waitTime:F0} seconds waiting in queue. " +
+                                "This usually happens when Unity is unfocused or busy. Please ensure Unity is focused and try again."
+                        }
+                    };
+                    
+                    _ = SendMessageAsync(timeoutResult);
+                    BridgeConfig.RecordActivity(command.Name, (int)(waitTime * 1000), false, "Queue timeout");
+                    
+                    // Schedule next command
+                    EditorApplication.delayCall += ProcessNextCommand;
+                    return;
+                }
+                
+                // Execute the command and schedule next when done
+                ExecuteCommandAsync(command);
+            }
+        }
+        
+        /// <summary>
+        /// Execute a single command and then process the next one
+        /// </summary>
+        private static async void ExecuteCommandAsync(QueuedCommand command)
+        {
+            var commandId = command.Id;
+            var commandName = command.Name;
+            var parameters = command.Parameters;
             var startTime = DateTime.Now;
             
             FileLogger.Log("INFO", "WebSocketClient", $"Executing command: {commandName} ({commandId})");
@@ -705,23 +814,35 @@ namespace UnityVision.Editor.Transport
                 FileLogger.Log("ERROR", "WebSocketClient", $"Command failed: {commandName} - {ex.Message}");
                 errorMsg = ex.Message;
                 
-                // Send error back
-                resultMessage["error"] = new JObject
+                // Send error back - wrapped in try-catch to prevent blocking queue
+                try
                 {
-                    ["code"] = "EXECUTION_ERROR",
-                    ["message"] = ex.Message
-                };
-                
-                await SendMessageAsync(resultMessage);
+                    resultMessage["error"] = new JObject
+                    {
+                        ["code"] = "EXECUTION_ERROR",
+                        ["message"] = ex.Message
+                    };
+                    
+                    await SendMessageAsync(resultMessage);
+                }
+                catch (Exception sendEx)
+                {
+                    FileLogger.Log("ERROR", "WebSocketClient", $"Failed to send error response: {sendEx.Message}");
+                }
             }
             finally
             {
+                // CRITICAL: Always clean up and schedule next command
                 BridgeConfig.ClearPendingCommand(commandId);
+                
+                // Record activity for UI (with actual duration)
+                var durationMs = (int)(DateTime.Now - startTime).TotalMilliseconds;
+                BridgeConfig.RecordActivity(commandName, durationMs, success, errorMsg);
+                
+                // Schedule next command in queue (sequential execution)
+                // This MUST be in finally to ensure queue continues even on errors
+                EditorApplication.delayCall += ProcessNextCommand;
             }
-            
-            // Record activity for UI (with actual duration)
-            var durationMs = (int)(DateTime.Now - startTime).TotalMilliseconds;
-            BridgeConfig.RecordActivity(commandName, durationMs, success, errorMsg);
         }
         
         /// <summary>

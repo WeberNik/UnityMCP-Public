@@ -85,6 +85,12 @@ namespace UnityVision.Editor.Transport
         private static bool _updateHooked;
         private static bool _initialized;
         private static int _commandCounter;
+        private static bool _unfocusedWarningShown;
+        private static DateTime _lastUnfocusedCheck = DateTime.MinValue;
+        
+        // Timeout configuration
+        private const int DefaultTimeoutSeconds = 30;
+        private const int UnfocusedWarningIntervalSeconds = 10;
         
         // ============================================================================
         // Public API
@@ -209,6 +215,12 @@ namespace UnityVision.Editor.Transport
         
         private static void ProcessQueue()
         {
+            // Check if Unity is unfocused and warn user
+            CheckUnfocusedState();
+            
+            // Check for timed out commands
+            CheckTimeouts();
+            
             List<(string id, PendingCommand pending)> ready;
             
             lock (_pendingLock)
@@ -230,10 +242,129 @@ namespace UnityVision.Editor.Transport
                 }
             }
             
-            // Process commands on main thread
+            // Process commands on main thread - each in its own try-catch
+            // to prevent one failing command from blocking others
             foreach (var (id, pending) in ready)
             {
-                ProcessCommand(id, pending);
+                try
+                {
+                    ProcessCommand(id, pending);
+                }
+                catch (Exception ex)
+                {
+                    // Ensure command is cleaned up even if processing throws
+                    FileLogger.LogError("CommandDispatcher", $"Unhandled exception processing {pending.CommandName}: {ex.Message}", ex);
+                    
+                    try
+                    {
+                        var errorResponse = new JObject
+                        {
+                            ["status"] = "error",
+                            ["error"] = $"Unhandled exception: {ex.Message}",
+                            ["stackTrace"] = ex.StackTrace
+                        };
+                        pending.TrySetResult(errorResponse.ToString(Formatting.None));
+                    }
+                    catch
+                    {
+                        // Last resort - just try to complete the task
+                        pending.TrySetException(ex);
+                    }
+                    
+                    RemovePending(id, pending);
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Check if Unity is unfocused and warn the user periodically
+        /// </summary>
+        private static void CheckUnfocusedState()
+        {
+            int pendingCount;
+            lock (_pendingLock)
+            {
+                pendingCount = _pending.Count;
+            }
+            
+            if (pendingCount == 0) return;
+            
+            // Check if Unity has any focused window
+            bool isUnfocused = EditorWindow.focusedWindow == null;
+            
+            if (isUnfocused)
+            {
+                var now = DateTime.Now;
+                var timeSinceLastWarning = (now - _lastUnfocusedCheck).TotalSeconds;
+                
+                // Show warning periodically (not every frame)
+                if (!_unfocusedWarningShown || timeSinceLastWarning > UnfocusedWarningIntervalSeconds)
+                {
+                    Debug.LogWarning(
+                        "[UnityVision] Unity Editor is not focused. MCP commands will execute slowly.\n" +
+                        "Please keep Unity window visible for best performance.\n" +
+                        $"Pending commands: {pendingCount}");
+                    
+                    FileLogger.Log("WARN", "CommandDispatcher", 
+                        $"Unity unfocused with {pendingCount} pending commands. Performance degraded.");
+                    
+                    _unfocusedWarningShown = true;
+                    _lastUnfocusedCheck = now;
+                }
+            }
+            else
+            {
+                // Reset warning flag when Unity regains focus
+                if (_unfocusedWarningShown)
+                {
+                    FileLogger.Log("INFO", "CommandDispatcher", "Unity focused. Normal performance restored.");
+                    _unfocusedWarningShown = false;
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Check for commands that have exceeded timeout and fail them gracefully
+        /// </summary>
+        private static void CheckTimeouts()
+        {
+            var now = DateTime.Now;
+            var timedOut = new List<(string id, PendingCommand pending)>();
+            
+            lock (_pendingLock)
+            {
+                foreach (var kvp in _pending)
+                {
+                    var pending = kvp.Value;
+                    var waitTime = (now - pending.QueuedAt).TotalSeconds;
+                    
+                    if (waitTime > DefaultTimeoutSeconds && !pending.IsExecuting)
+                    {
+                        timedOut.Add((kvp.Key, pending));
+                    }
+                }
+            }
+            
+            // Fail timed out commands
+            foreach (var (id, pending) in timedOut)
+            {
+                var waitTime = (int)(now - pending.QueuedAt).TotalSeconds;
+                var errorMessage = $"Command '{pending.CommandName}' timed out after {waitTime} seconds. " +
+                    "This usually happens when Unity is unfocused or busy compiling. " +
+                    "Please ensure Unity Editor is visible and not compiling, then try again.";
+                
+                FileLogger.LogError("CommandDispatcher", errorMessage, null);
+                
+                var errorResponse = new JObject
+                {
+                    ["status"] = "error",
+                    ["error"] = errorMessage,
+                    ["code"] = "TIMEOUT",
+                    ["waitTimeSeconds"] = waitTime
+                };
+                
+                pending.TrySetResult(errorResponse.ToString(Formatting.None));
+                RemovePending(id, pending);
             }
         }
         

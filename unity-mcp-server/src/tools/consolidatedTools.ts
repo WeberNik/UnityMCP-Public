@@ -321,6 +321,10 @@ export const consolidatedToolDefinitions = [
           enum: ['Cube', 'Sphere', 'Capsule', 'Cylinder', 'Plane', 'Quad'],
           description: 'For create: primitive type to create',
         },
+        confirm: {
+          type: 'boolean',
+          description: 'For delete: set to true to confirm deletion (required for actual delete)',
+        },
       },
       required: ['action'],
     },
@@ -1053,11 +1057,11 @@ export const consolidatedToolHandlers: Record<string, (params: ToolParams) => Pr
 
   // 4. unity_gameobject
   unity_gameobject: async (params) => {
-    const { action, ...rest } = params;
+    const { action, targetId, ...rest } = params;
     switch (action) {
       case 'create': return createGameObject(rest as any);
-      case 'modify': return modifyGameObject(rest as any);
-      case 'delete': return deleteGameObject(rest as any);
+      case 'modify': return modifyGameObject({ path: targetId, ...rest } as any);
+      case 'delete': return deleteGameObject({ path: targetId, ...rest } as any);
       default: throw new Error(`Unknown action: ${action}`);
     }
   },

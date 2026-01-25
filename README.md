@@ -547,6 +547,55 @@ UnityMCP-Public/
 
 ---
 
+## ⚠️ Important Notes
+
+### Unity Editor Focus Requirement
+
+**UnityVision requires the Unity Editor window to be visible/focused for optimal performance.**
+
+This is a Unity engine limitation, not a bug in UnityVision. Here's why:
+
+- **Root Cause**: Unity throttles `EditorApplication.update` callbacks when the editor is unfocused
+  - **Focused**: ~60 updates/second (normal performance)
+  - **Unfocused**: ~1-5 updates/second (severely degraded)
+- **Impact**: MCP commands queue and execute slowly when Unity is in the background
+- **Detection**: UnityVision will warn you in the Unity Console when this happens
+
+**Best Practices:**
+1. ✅ **Keep Unity visible** - Arrange windows side-by-side with your AI assistant
+2. ✅ **Monitor Unity Console** - Watch for unfocused warnings
+3. ✅ **Wait for compilation** - Don't run MCP commands while Unity is compiling
+4. ⚠️ **30-second timeout** - Commands that don't execute within 30 seconds will fail with a clear error message
+
+**Example Window Arrangement:**
+```
+┌─────────────────┬─────────────────┐
+│   Windsurf/     │   Unity Editor  │
+│   Claude/Cursor │   (VISIBLE)     │
+│                 │                 │
+│   AI Assistant  │   Scene View    │
+│   Chat          │   Game View     │
+└─────────────────┴─────────────────┘
+```
+
+### Compilation and Performance
+
+Unity may briefly compile during MCP operations if:
+- Scripts are created or modified
+- Assets are imported or changed
+- Packages are added or removed
+
+**What happens during compilation:**
+- MCP commands will be rejected with: `"Unity is currently compiling scripts. Please wait..."`
+- This prevents commands from hanging or causing errors
+- Wait for compilation to finish (watch Unity's bottom-right progress bar)
+
+**To minimize compilation:**
+- Disable auto-refresh: `Edit > Preferences > Asset Pipeline > Auto Refresh = Off`
+- Manually refresh when needed: `Assets > Refresh` or `Ctrl+R`
+
+---
+
 ## ⚙️ Configuration
 
 ### Environment Variables
