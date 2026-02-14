@@ -31,8 +31,8 @@ namespace UnityVision.Editor.Transport
         private static ClientWebSocket _socket;
         private static CancellationTokenSource _cts;
         private static Thread _receiveThread;
-        private static bool _isConnected;
-        private static bool _isConnecting;
+        private static volatile bool _isConnected;
+        private static volatile bool _isConnecting;
         private static string _sessionId;
         private static DateTime _lastPingTime;
         private static DateTime _connectedSince;
@@ -63,7 +63,14 @@ namespace UnityVision.Editor.Transport
         // Configuration
         private const int DEFAULT_PORT = 6400;
         private const string PORT_PREF_KEY = "UnityVision_WebSocketPort";
+        private const string AUTOFOCUS_PREF_KEY = "UnityVision_AutoFocusEnabled";
         private const int PING_INTERVAL_MS = 15000;
+        private const double AUTOFOCUS_DELAY_SECONDS = 2.0; // Only focus after commands wait this long
+        private const int STALE_COMMAND_TIMEOUT_SECONDS = 30;
+        
+        // Auto-focus configuration
+        private static bool _autoFocusEnabled = true;
+        private static DateTime _lastAutoFocusTime = DateTime.MinValue;
         
         // Pending command responses
         private static readonly Dictionary<string, TaskCompletionSource<JObject>> _pendingCommands = 
@@ -104,6 +111,23 @@ namespace UnityVision.Editor.Transport
         public static string SessionId => _sessionId;
         public static DateTime? ConnectedSince => _isConnected ? _connectedSince : (DateTime?)null;
         public static int Port { get; private set; } = DEFAULT_PORT;
+        public static int PendingCommandCount
+        {
+            get
+            {
+                lock (_queueLock) return _commandQueue.Count;
+            }
+        }
+        public static int PendingMessageCount
+        {
+            get
+            {
+                lock (_messageLock) return _pendingMessages.Count;
+            }
+        }
+        public static bool IsProcessingCommand => _isProcessingCommand;
+        public static DateTime LastMainThreadActivity => _lastMainThreadActivity;
+        public static DateTime LastPingTime => _lastPingTime;
         
         /// <summary>
         /// Set the WebSocket port and save to EditorPrefs. Requires reconnect to take effect.
@@ -163,10 +187,23 @@ namespace UnityVision.Editor.Transport
             EditorApplication.update += Update;
             
             _lastMainThreadActivity = DateTime.Now;
+            _autoFocusEnabled = UnityEditor.EditorPrefs.GetBool(AUTOFOCUS_PREF_KEY, true);
             
             // Delay connection and thread creation until after domain reload is complete
             // This prevents crashes during Play mode transition
             EditorApplication.delayCall += DelayedInitialize;
+        }
+
+        private static void FireAndForget(Task task, string operationName)
+        {
+            _ = task.ContinueWith(t =>
+            {
+                if (t.IsFaulted)
+                {
+                    FileLogger.Log("ERROR", "WebSocketClient",
+                        $"{operationName} failed: {t.Exception?.GetBaseException().Message}");
+                }
+            }, TaskScheduler.Default);
         }
         
         /// <summary>
@@ -255,7 +292,23 @@ namespace UnityVision.Editor.Transport
         }
         
         /// <summary>
+        /// Whether to automatically bring Unity to the foreground when commands are pending.
+        /// This dramatically improves command responsiveness when Unity is unfocused.
+        /// </summary>
+        public static bool AutoFocusEnabled
+        {
+            get => _autoFocusEnabled;
+            set
+            {
+                _autoFocusEnabled = value;
+                UnityEditor.EditorPrefs.SetBool(AUTOFOCUS_PREF_KEY, value);
+            }
+        }
+        
+        /// <summary>
         /// Force Unity Editor to process pending callbacks even when unfocused.
+        /// Uses QueuePlayerLoopUpdate() (Unity 2021.2+) as the primary mechanism,
+        /// with RepaintAllViews and optional auto-focus as supplementary methods.
         /// MUST be called from main thread only!
         /// </summary>
         private static void ForceEditorUpdate()
@@ -263,9 +316,43 @@ namespace UnityVision.Editor.Transport
             try
             {
                 // Only call Unity APIs from main thread
-                if (!EditorApplication.isPlayingOrWillChangePlaymode)
+                if (EditorApplication.isPlayingOrWillChangePlaymode)
+                    return;
+                
+                // Method 1 (PRIMARY): Request an extra editor update tick.
+                // QueuePlayerLoopUpdate() is the official Unity API (2021.2+) designed
+                // to force EditorApplication.update to fire even when unfocused.
+                #if UNITY_2021_2_OR_NEWER
+                EditorApplication.QueuePlayerLoopUpdate();
+                #endif
+                
+                // Method 2: Repaint all views as a supplementary trigger
+                InternalEditorUtility.RepaintAllViews();
+                
+                // Method 3: Auto-focus Unity when commands have been waiting too long
+                if (_autoFocusEnabled && _hasPendingCommands)
                 {
-                    InternalEditorUtility.RepaintAllViews();
+                    bool hasStaleCommands = false;
+                    lock (_queueLock)
+                    {
+                        if (_commandQueue.Count > 0)
+                        {
+                            var front = _commandQueue.Peek();
+                            hasStaleCommands = (DateTime.Now - front.QueuedAt).TotalSeconds > AUTOFOCUS_DELAY_SECONDS;
+                        }
+                    }
+                    
+                    if (hasStaleCommands && (DateTime.Now - _lastAutoFocusTime).TotalSeconds > 5.0)
+                    {
+                        _lastAutoFocusTime = DateTime.Now;
+                        // Bring Unity to the foreground by focusing the Scene View
+                        var sceneView = SceneView.lastActiveSceneView;
+                        if (sceneView != null)
+                        {
+                            sceneView.Focus();
+                            FileLogger.Log("INFO", "WebSocketClient", "Auto-focused Unity Editor (commands pending while unfocused)");
+                        }
+                    }
                 }
             }
             catch
@@ -349,6 +436,9 @@ namespace UnityVision.Editor.Transport
             // Process pending messages from background thread (MAIN THREAD ONLY)
             ProcessPendingMessages();
             
+            // Reap stale commands that have been in the queue too long
+            ReapStaleCommands();
+            
             // Handle connection lost flag (set by background thread)
             if (_connectionLost)
             {
@@ -397,9 +487,53 @@ namespace UnityVision.Editor.Transport
         }
         
         /// <summary>
+        /// Reap commands that have been stuck in the queue longer than STALE_COMMAND_TIMEOUT_SECONDS.
+        /// This prevents infinite queue buildup when Unity is unresponsive.
+        /// </summary>
+        private static void ReapStaleCommands()
+        {
+            lock (_queueLock)
+            {
+                while (_commandQueue.Count > 0)
+                {
+                    var front = _commandQueue.Peek();
+                    var age = (DateTime.Now - front.QueuedAt).TotalSeconds;
+                    if (age > STALE_COMMAND_TIMEOUT_SECONDS)
+                    {
+                        _commandQueue.Dequeue();
+                        FileLogger.Log("WARN", "WebSocketClient", $"Reaped stale command '{front.Name}' ({front.Id}) after {age:F0}s in queue");
+                        
+                        var timeoutResult = new JObject
+                        {
+                            ["type"] = "command_result",
+                            ["id"] = front.Id,
+                            ["error"] = new JObject
+                            {
+                                ["code"] = "QUEUE_TIMEOUT",
+                                ["message"] = $"Command '{front.Name}' expired after {age:F0}s in queue. " +
+                                    "Unity may have been unfocused or busy. Please retry."
+                            }
+                        };
+                        _ = SendMessageAsync(timeoutResult);
+                        BridgeConfig.RecordActivity(front.Name, (int)(age * 1000), false, "Queue timeout (reaped)");
+                    }
+                    else
+                    {
+                        break; // Queue is FIFO — if front isn't stale, nothing behind it is
+                    }
+                }
+            }
+        }
+        
+        /// <summary>
         /// Connect to the MCP server's WebSocket hub
         /// </summary>
-        public static async void ConnectAsync()
+        public static void ConnectAsync()
+        {
+            FireAndForget(ConnectAsyncInternal(), "ConnectAsync");
+        }
+
+        private static async Task ConnectAsyncInternal()
         {
             if (_isConnected || _isConnecting) return;
             
@@ -428,7 +562,7 @@ namespace UnityVision.Editor.Transport
                 StartKeepaliveThread();
                 
                 // Start receive loop
-                _receiveThread = new Thread(ReceiveLoop) { IsBackground = true };
+                _receiveThread = new Thread(ReceiveLoopThreadEntry) { IsBackground = true };
                 _receiveThread.Start();
                 
                 // Send registration message
@@ -556,6 +690,57 @@ namespace UnityVision.Editor.Transport
             // Connect
             ConnectAsync();
         }
+
+        /// <summary>
+        /// Snapshot of transport diagnostics for troubleshooting stuck/slow command flow.
+        /// </summary>
+        public static object GetTransportDiagnostics()
+        {
+            int queueDepth;
+            double? frontCommandAgeMs = null;
+            lock (_queueLock)
+            {
+                queueDepth = _commandQueue.Count;
+                if (_commandQueue.Count > 0)
+                {
+                    var front = _commandQueue.Peek();
+                    frontCommandAgeMs = (DateTime.Now - front.QueuedAt).TotalMilliseconds;
+                }
+            }
+
+            int pendingMessageCount;
+            lock (_messageLock)
+            {
+                pendingMessageCount = _pendingMessages.Count;
+            }
+
+            var pendingSince = BridgeConfig.PendingSince;
+            var inFlightAgeMs = pendingSince.HasValue
+                ? (double?)(DateTime.Now - pendingSince.Value).TotalMilliseconds
+                : null;
+
+            return new
+            {
+                isConnected = _isConnected,
+                isConnecting = _isConnecting,
+                isProcessingCommand = _isProcessingCommand,
+                hasPendingCommandsFlag = _hasPendingCommands,
+                sessionId = _sessionId,
+                port = Port,
+                autoFocusEnabled = _autoFocusEnabled,
+                staleCommandTimeoutSeconds = STALE_COMMAND_TIMEOUT_SECONDS,
+                queueDepth,
+                frontCommandAgeMs,
+                pendingMessageCount,
+                inFlightCommand = BridgeConfig.PendingCommand,
+                inFlightCommandAgeMs = inFlightAgeMs,
+                lastMainThreadActivityUtc = _lastMainThreadActivity.ToUniversalTime(),
+                lastMainThreadActivityAgeMs = (DateTime.Now - _lastMainThreadActivity).TotalMilliseconds,
+                lastPingUtc = _lastPingTime.ToUniversalTime(),
+                lastPingAgeMs = (DateTime.Now - _lastPingTime).TotalMilliseconds,
+                connectedSinceUtc = _isConnected ? _connectedSince.ToUniversalTime() : (DateTime?)null,
+            };
+        }
         
         /// <summary>
         /// Send registration message to identify this Unity instance
@@ -660,7 +845,19 @@ namespace UnityVision.Editor.Transport
         /// <summary>
         /// Receive loop for incoming messages
         /// </summary>
-        private static async void ReceiveLoop()
+        private static void ReceiveLoopThreadEntry()
+        {
+            try
+            {
+                ReceiveLoopAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log("ERROR", "WebSocketClient", $"Receive loop thread crashed: {ex.Message}");
+            }
+        }
+
+        private static async Task ReceiveLoopAsync()
         {
             var buffer = new byte[8192];
             var messageBuilder = new StringBuilder();
@@ -848,7 +1045,12 @@ namespace UnityVision.Editor.Transport
         /// <summary>
         /// Execute a single command and then process the next one
         /// </summary>
-        private static async void ExecuteCommandAsync(QueuedCommand command)
+        private static void ExecuteCommandAsync(QueuedCommand command)
+        {
+            FireAndForget(ExecuteCommandAsyncInternal(command), $"ExecuteCommandAsync({command?.Name})");
+        }
+
+        private static async Task ExecuteCommandAsyncInternal(QueuedCommand command)
         {
             var commandId = command.Id;
             var commandName = command.Name;

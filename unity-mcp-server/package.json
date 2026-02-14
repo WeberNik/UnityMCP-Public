@@ -1,6 +1,6 @@
 {
   "name": "unityvision-mcp",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "The most powerful AI bridge for Unity Editor - MCP server with 35 tools for scene manipulation, screenshots, code execution, and more",
   "main": "dist/server.js",
   "type": "module",

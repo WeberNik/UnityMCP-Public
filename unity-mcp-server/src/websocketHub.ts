@@ -32,6 +32,7 @@ export interface UnitySession {
 export interface PendingCommand {
   id: string;
   method: string;
+  sessionId: string;
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
@@ -60,7 +61,12 @@ interface ExecuteCommandMessage {
 interface CommandResultMessage {
   type: 'command_result';
   id: string;
-  result: unknown;
+  result?: unknown;
+  error?: {
+    code?: string;
+    message?: string;
+    details?: unknown;
+  };
 }
 
 interface RegisterMessage {
@@ -70,6 +76,11 @@ interface RegisterMessage {
   unity_version: string;
   client_name?: string;
   platform?: string;
+}
+
+interface PingMessage {
+  type: 'ping';
+  session_id?: string;
 }
 
 interface PongMessage {
@@ -119,9 +130,21 @@ export class WebSocketPluginHub {
   private readonly KEEP_ALIVE_INTERVAL = 15000; // 15 seconds
   private readonly SERVER_TIMEOUT = 30000; // 30 seconds
   private readonly COMMAND_TIMEOUT = 30000; // 30 seconds
-  private readonly RECONNECT_GRACE_PERIOD = 10000; // 10 seconds to wait for Unity reconnect
+  private readonly RECONNECT_GRACE_PERIOD = 45000; // 45 seconds to wait for Unity reconnect (assembly reloads can be slow)
   private readonly RATE_LIMIT_WINDOW_MS = 1000; // 1 second window
   private readonly RATE_LIMIT_MAX_REQUESTS = 50; // Max requests per window
+  
+  // Heartbeat timer for dead session detection
+  private keepAliveTimer: NodeJS.Timeout | null = null;
+  
+  // Circuit breaker state
+  private consecutiveFailures: number = 0;
+  private circuitBreakerUntil: number = 0;
+  private readonly CIRCUIT_BREAKER_THRESHOLD = 3;
+  private readonly CIRCUIT_BREAKER_COOLDOWN = 10000; // 10 seconds
+  
+  // Session waiters for resolveSession
+  private sessionWaiters: Array<{ resolve: (session: UnitySession | PromiseLike<UnitySession>) => void; projectHash?: string }> = [];
   
   private constructor(port: number = 6400) {
     this.port = port;
@@ -198,6 +221,9 @@ export class WebSocketPluginHub {
             this.handleConnection(socket, request);
           });
           
+          // Start heartbeat timer for dead session detection
+          this.startHeartbeat();
+          
           resolve();
         });
         
@@ -218,6 +244,9 @@ export class WebSocketPluginHub {
     if (!this.isRunning || !this.wss) {
       return;
     }
+    
+    // Stop heartbeat timer
+    this.stopHeartbeat();
     
     // Reject all pending commands
     for (const [id, pending] of this.pendingCommands) {
@@ -289,6 +318,9 @@ export class WebSocketPluginHub {
       case 'register_tools':
         this.handleRegisterTools(socket, message as RegisterToolsMessage);
         break;
+      case 'ping':
+        this.handlePing(socket, message as PingMessage);
+        break;
       case 'pong':
         this.handlePong(message as PongMessage);
         break;
@@ -339,6 +371,23 @@ export class WebSocketPluginHub {
     
     fileLog('INFO', 'WebSocketHub', `Registered session ${sessionId} for ${message.project_name} (${message.project_hash})`);
     console.error(`[UnityVision] Unity connected: ${message.project_name} (Unity ${message.unity_version})`);
+    
+    // Resolve any pending session waiters immediately (session migration)
+    const resolvedWaiters: number[] = [];
+    for (let i = 0; i < this.sessionWaiters.length; i++) {
+      const waiter = this.sessionWaiters[i];
+      if (!waiter.projectHash || waiter.projectHash === message.project_hash) {
+        waiter.resolve(session);
+        resolvedWaiters.push(i);
+      }
+    }
+    // Remove resolved waiters in reverse order to preserve indices
+    for (let i = resolvedWaiters.length - 1; i >= 0; i--) {
+      this.sessionWaiters.splice(resolvedWaiters[i], 1);
+    }
+    if (resolvedWaiters.length > 0) {
+      fileLog('INFO', 'WebSocketHub', `Resolved ${resolvedWaiters.length} pending session waiter(s) for ${message.project_name}`);
+    }
   }
   
   private handleRegisterTools(socket: WebSocket, message: RegisterToolsMessage): void {
@@ -389,29 +438,32 @@ export class WebSocketPluginHub {
     const duration = Date.now() - pending.startTime;
     fileLog('INFO', 'WebSocketHub', `Command ${pending.method} completed in ${duration}ms`);
     
-    // Check if result contains an error
     const result = message.result as any;
-    if (result && result.status === 'error') {
-      pending.reject(new Error(result.error || 'Command failed'));
+    const topLevelError = message.error;
+    const nestedError = result && result.status === 'error';
+    if (topLevelError || nestedError) {
+      this.consecutiveFailures++;
+      const errorMessage =
+        topLevelError?.message ||
+        result?.error ||
+        `Command '${pending.method}' failed`;
+      pending.reject(new Error(errorMessage));
     } else {
+      // Success - reset circuit breaker
+      if (this.consecutiveFailures > 0) {
+        fileLog('INFO', 'WebSocketHub', `Circuit breaker reset - command succeeded after ${this.consecutiveFailures} failure(s)`);
+      }
+      this.consecutiveFailures = 0;
+      this.circuitBreakerUntil = 0;
       pending.resolve(result);
     }
   }
-  
   private handleDisconnect(socket: WebSocket, code: number, reason: string): void {
-    // Find and remove the session
+    // Find and clean up the session, immediately rejecting its pending commands
     for (const [sessionId, session] of this.sessions) {
       if (session.socket === socket) {
-        this.sessions.delete(sessionId);
         fileLog('INFO', 'WebSocketHub', `Session ${sessionId} disconnected: ${code} - ${reason}`);
-        console.error(`[UnityVision] Unity disconnected: ${session.projectName}`);
-        
-        // Reject any pending commands for this session
-        for (const [cmdId, pending] of this.pendingCommands) {
-          // We can't easily track which commands belong to which session
-          // So we'll let them timeout naturally
-        }
-        
+        this.cleanupSession(sessionId, session);
         return;
       }
     }
@@ -457,6 +509,101 @@ export class WebSocketPluginHub {
   }
   
   // ============================================================================
+  // Heartbeat & Health Checking
+  // ============================================================================
+  
+  /**
+   * Start periodic heartbeat that detects dead sessions.
+   * Checks if sessions have sent a ping within SERVER_TIMEOUT.
+   */
+  private startHeartbeat(): void {
+    this.stopHeartbeat(); // Ensure no duplicate timers
+    
+    this.keepAliveTimer = setInterval(() => {
+      const now = Date.now();
+      const deadSessions: string[] = [];
+      
+      for (const [id, session] of this.sessions) {
+        const timeSinceLastPing = now - session.lastPing.getTime();
+        if (timeSinceLastPing > this.SERVER_TIMEOUT) {
+          fileLog('WARN', 'WebSocketHub', `Session ${id} (${session.projectName}) timed out — no ping for ${timeSinceLastPing}ms`);
+          deadSessions.push(id);
+        }
+      }
+      
+      // Clean up dead sessions
+      for (const id of deadSessions) {
+        const session = this.sessions.get(id);
+        if (session) {
+          try { session.socket.close(1001, 'Heartbeat timeout'); } catch { /* ignore */ }
+          this.cleanupSession(id, session);
+        }
+      }
+      
+      // Also clean up stale rate limit entries
+      this.cleanupRateLimits();
+    }, this.KEEP_ALIVE_INTERVAL);
+  }
+  
+  /**
+   * Stop the heartbeat timer.
+   */
+  private stopHeartbeat(): void {
+    if (this.keepAliveTimer) {
+      clearInterval(this.keepAliveTimer);
+      this.keepAliveTimer = null;
+    }
+  }
+  
+  /**
+   * Handle incoming ping from Unity — respond with pong and update lastPing.
+   */
+  private handlePing(ws: WebSocket, message: PingMessage): void {
+    // Find session by socket
+    for (const session of this.sessions.values()) {
+      if (session.socket === ws) {
+        session.lastPing = new Date();
+        try {
+          ws.send(JSON.stringify({ type: 'pong' }));
+        } catch { /* ignore send errors */ }
+        fileLog('DEBUG', 'WebSocketHub', `Ping received from ${session.projectName}, sent pong`);
+        return;
+      }
+    }
+    // Ping from unregistered socket — still respond
+    try {
+      ws.send(JSON.stringify({ type: 'pong' }));
+    } catch { /* ignore */ }
+  }
+  
+  /**
+   * Clean up a session and immediately reject all its pending commands.
+   */
+  private cleanupSession(sessionId: string, session: UnitySession): void {
+    this.sessions.delete(sessionId);
+    fileLog('INFO', 'WebSocketHub', `Session ${sessionId} cleaned up (${session.projectName})`);
+    console.error(`[UnityVision] Unity disconnected: ${session.projectName}`);
+    
+    // Immediately reject all pending commands that belonged to this session
+    const commandsToReject: string[] = [];
+    for (const [cmdId, pending] of this.pendingCommands) {
+      if (pending.sessionId === sessionId) {
+        commandsToReject.push(cmdId);
+      }
+    }
+    
+    for (const cmdId of commandsToReject) {
+      const pending = this.pendingCommands.get(cmdId);
+      if (pending) {
+        clearTimeout(pending.timeout);
+        pending.reject(new Error(`Unity session disconnected (${session.projectName}). Command '${pending.method}' aborted.`));
+        this.pendingCommands.delete(cmdId);
+        fileLog('WARN', 'WebSocketHub', `Rejected pending command ${pending.method} (${cmdId}) — session disconnected`);
+      }
+    }
+  }
+  
+  // ============================================================================
   // Command Execution
   // ============================================================================
   
@@ -465,6 +612,16 @@ export class WebSocketPluginHub {
     params: Record<string, unknown>,
     projectHash?: string
   ): Promise<T> {
+    // Circuit breaker check — fast-fail if too many consecutive failures
+    if (Date.now() < this.circuitBreakerUntil) {
+      const remainingMs = this.circuitBreakerUntil - Date.now();
+      throw new Error(
+        `Circuit breaker open — ${this.consecutiveFailures} consecutive command failures. ` +
+        `Unity may be unresponsive. Auto-retrying in ${Math.ceil(remainingMs / 1000)}s. ` +
+        `Please ensure Unity is focused and not compiling.`
+      );
+    }
+    
     const session = await this.resolveSession(projectHash);
     
     // Rate limit check
@@ -480,13 +637,22 @@ export class WebSocketPluginHub {
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingCommands.delete(commandId);
-        fileLog('ERROR', 'WebSocketHub', `Command ${method} (${commandId}) timed out after ${this.COMMAND_TIMEOUT}ms`);
+        this.consecutiveFailures++;
+        fileLog('ERROR', 'WebSocketHub', `Command ${method} (${commandId}) timed out after ${this.COMMAND_TIMEOUT}ms (failures: ${this.consecutiveFailures})`);
+        
+        // Trip circuit breaker if threshold reached
+        if (this.consecutiveFailures >= this.CIRCUIT_BREAKER_THRESHOLD) {
+          this.circuitBreakerUntil = Date.now() + this.CIRCUIT_BREAKER_COOLDOWN;
+          fileLog('WARN', 'WebSocketHub', `Circuit breaker OPEN — ${this.consecutiveFailures} failures, cooldown ${this.CIRCUIT_BREAKER_COOLDOWN}ms`);
+        }
+        
         reject(new Error(`Command '${method}' timed out after ${this.COMMAND_TIMEOUT}ms`));
       }, this.COMMAND_TIMEOUT);
       
       const pending: PendingCommand = {
         id: commandId,
         method,
+        sessionId: session.sessionId,
         resolve: resolve as (result: unknown) => void,
         reject,
         timeout,
@@ -509,6 +675,7 @@ export class WebSocketPluginHub {
       } catch (error) {
         clearTimeout(timeout);
         this.pendingCommands.delete(commandId);
+        this.consecutiveFailures++;
         fileLog('ERROR', 'WebSocketHub', `Failed to send command: ${(error as Error).message}`);
         reject(new Error(`Failed to send command: ${(error as Error).message}`));
       }
@@ -516,46 +683,65 @@ export class WebSocketPluginHub {
   }
   
   private async resolveSession(projectHash?: string): Promise<UnitySession> {
-    // Wait for a session to be available (handles Unity startup/reload)
-    const maxWaitTime = this.RECONNECT_GRACE_PERIOD;
-    const checkInterval = 250;
-    let waited = 0;
+    // Quick check — is a session already available?
+    const existing = this.findSession(projectHash);
+    if (existing) return existing;
     
-    while (waited < maxWaitTime) {
-      // If specific project requested
-      if (projectHash) {
-        for (const session of this.sessions.values()) {
-          if (session.projectHash === projectHash) {
-            return session;
-          }
+    // No session yet — register a waiter and wait for one to connect
+    fileLog('DEBUG', 'WebSocketHub', `No Unity session available, waiting up to ${this.RECONNECT_GRACE_PERIOD}ms...`);
+    
+    return new Promise<UnitySession>((resolve, reject) => {
+      const waiter = { resolve, projectHash };
+      this.sessionWaiters.push(waiter);
+      
+      // Timeout after grace period
+      const timer = setTimeout(() => {
+        const idx = this.sessionWaiters.indexOf(waiter);
+        if (idx !== -1) {
+          this.sessionWaiters.splice(idx, 1);
         }
-      } else {
-        // Auto-select if only one session
-        if (this.sessions.size === 1) {
-          const session = this.sessions.values().next().value;
-          if (session) return session;
-        }
-        if (this.sessions.size > 1) {
-          throw new Error(
-            `Multiple Unity instances connected. Specify which one to use. ` +
-            `Available: ${Array.from(this.sessions.values()).map(s => `${s.projectName}@${s.projectHash}`).join(', ')}`
-          );
+        reject(new Error(
+          'No Unity instance connected. Please ensure Unity is running with the UnityVision package installed ' +
+          'and the WebSocket client is connected.'
+        ));
+      }, this.RECONNECT_GRACE_PERIOD);
+      
+      // Wrap resolve to clear the timeout
+      const originalResolve = waiter.resolve;
+      waiter.resolve = (session: UnitySession | PromiseLike<UnitySession>) => {
+        clearTimeout(timer);
+        originalResolve(session);
+      };
+    });
+  }
+  
+  /**
+   * Find an existing session matching the given projectHash (or auto-select if only one).
+   */
+  private findSession(projectHash?: string): UnitySession | null {
+    if (projectHash) {
+      for (const session of this.sessions.values()) {
+        if (session.projectHash === projectHash) {
+          return session;
         }
       }
-      
-      // No session yet, wait and retry
-      if (waited === 0) {
-        fileLog('DEBUG', 'WebSocketHub', `No Unity session available, waiting up to ${maxWaitTime}ms...`);
-      }
-      
-      await new Promise(resolve => setTimeout(resolve, checkInterval));
-      waited += checkInterval;
+      return null;
     }
     
-    throw new Error(
-      'No Unity instance connected. Please ensure Unity is running with the UnityVision package installed ' +
-      'and the WebSocket client is connected.'
-    );
+    // Auto-select if only one session
+    if (this.sessions.size === 1) {
+      const session = this.sessions.values().next().value;
+      if (session) return session;
+    }
+    
+    if (this.sessions.size > 1) {
+      throw new Error(
+        `Multiple Unity instances connected. Specify which one to use. ` +
+        `Available: ${Array.from(this.sessions.values()).map(s => `${s.projectName}@${s.projectHash}`).join(', ')}`
+      );
+    }
+    
+    return null;
   }
   
   // ============================================================================
@@ -579,9 +765,22 @@ export class WebSocketPluginHub {
   }
   
   getStatus(): object {
+    const now = Date.now();
     return {
       running: this.isRunning,
       port: this.port,
+      keepAliveIntervalMs: this.KEEP_ALIVE_INTERVAL,
+      serverTimeoutMs: this.SERVER_TIMEOUT,
+      commandTimeoutMs: this.COMMAND_TIMEOUT,
+      reconnectGracePeriodMs: this.RECONNECT_GRACE_PERIOD,
+      circuitBreaker: {
+        consecutiveFailures: this.consecutiveFailures,
+        threshold: this.CIRCUIT_BREAKER_THRESHOLD,
+        cooldownMs: this.CIRCUIT_BREAKER_COOLDOWN,
+        openUntilUnixMs: this.circuitBreakerUntil,
+        isOpen: now < this.circuitBreakerUntil,
+        remainingOpenMs: Math.max(0, this.circuitBreakerUntil - now),
+      },
       sessions: Array.from(this.sessions.values()).map(s => ({
         sessionId: s.sessionId,
         projectName: s.projectName,
@@ -591,12 +790,20 @@ export class WebSocketPluginHub {
         platform: s.platform,
         connectedAt: s.connectedAt.toISOString(),
         lastPing: s.lastPing.toISOString(),
+        lastPingAgeMs: now - s.lastPing.getTime(),
         customToolCount: s.customTools.size,
       })),
-      pendingCommands: this.pendingCommands.size,
+      pendingCommands: {
+        count: this.pendingCommands.size,
+        inFlight: Array.from(this.pendingCommands.values()).map((p) => ({
+          id: p.id,
+          method: p.method,
+          sessionId: p.sessionId,
+          ageMs: now - p.startTime,
+        })),
+      },
     };
   }
-  
   /**
    * Get all custom tools registered by Unity sessions
    */
@@ -654,3 +861,4 @@ export async function startWebSocketHub(port: number = 6400): Promise<WebSocketP
   await hub.start();
   return hub;
 }
+

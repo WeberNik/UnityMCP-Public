@@ -112,3 +112,8 @@ export async function refreshAssets(): Promise<unknown> {
   const client = getBridgeClient();
   return client.call('editor_refresh', {});
 }
+
+export async function getTransportDiagnostics(): Promise<unknown> {
+  const client = getBridgeClient();
+  return client.call('get_transport_diagnostics', {});
+}

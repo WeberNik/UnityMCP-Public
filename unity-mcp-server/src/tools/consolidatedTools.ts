@@ -13,6 +13,7 @@ import {
   getActiveContext,
   recompileScripts,
   refreshAssets,
+  getTransportDiagnostics,
 } from './editorTools.js';
 
 import {
@@ -175,13 +176,13 @@ export const consolidatedToolDefinitions = [
   // 1. unity_editor - Editor state and play mode control
   {
     name: 'unity_editor',
-    description: 'Control Unity Editor state. Actions: get_state, set_play_mode, get_context, recompile, refresh',
+    description: 'Control Unity Editor state. Actions: get_state, set_play_mode, get_context, recompile, refresh, transport_diagnostics',
     inputSchema: {
       type: 'object' as const,
       properties: {
         action: {
           type: 'string',
-          enum: ['get_state', 'set_play_mode', 'get_context', 'recompile', 'refresh'],
+          enum: ['get_state', 'set_play_mode', 'get_context', 'recompile', 'refresh', 'transport_diagnostics'],
           description: 'Action to perform',
         },
         mode: {
@@ -996,14 +997,14 @@ Will refuse to run if Unity is compiling. Keep Unity focused.`,
   // 27. unity_status - Connection status (always works, even without Unity)
   {
     name: 'unity_status',
-    description: 'Check Unity connection status. This tool always works, even when Unity is not connected. Use this to check if Unity is ready before calling other tools.',
+    description: 'Check Unity connection status or fetch deep transport diagnostics. Actions: check, transport_diagnostics.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         action: {
           type: 'string',
-          enum: ['check'],
-          description: 'Action to perform (check)',
+          enum: ['check', 'transport_diagnostics'],
+          description: 'Action to perform',
         },
       },
       required: ['action'],
@@ -1027,6 +1028,7 @@ export const consolidatedToolHandlers: Record<string, (params: ToolParams) => Pr
       case 'get_context': return getActiveContext(rest as any);
       case 'recompile': return recompileScripts();
       case 'refresh': return refreshAssets();
+      case 'transport_diagnostics': return getTransportDiagnostics();
       default: throw new Error(`Unknown action: ${action}`);
     }
   },
@@ -1321,6 +1323,8 @@ export const consolidatedToolHandlers: Record<string, (params: ToolParams) => Pr
 
   // 27. unity_status - Connection status (always works, even without Unity)
   unity_status: async (params) => {
+    const action = params.action ?? 'check';
+
     // Import dynamically to avoid circular dependency
     const { getWebSocketHub } = await import('../websocketHub.js');
     const hub = getWebSocketHub();
@@ -1334,6 +1338,25 @@ export const consolidatedToolHandlers: Record<string, (params: ToolParams) => Pr
         connectedAt: string;
       }>;
     };
+
+    if (action === 'transport_diagnostics') {
+      let unityTransportDiagnostics: unknown = null;
+      let unityTransportError: string | null = null;
+      try {
+        const { getBridgeClient } = await import('../unityBridgeClient.js');
+        unityTransportDiagnostics = await getBridgeClient().call('get_transport_diagnostics', {});
+      } catch (error) {
+        unityTransportError = error instanceof Error ? error.message : String(error);
+      }
+
+      return {
+        status: 'transport_diagnostics',
+        capturedAt: new Date().toISOString(),
+        serverTransport: status,
+        unityTransport: unityTransportDiagnostics,
+        unityTransportError,
+      };
+    }
     
     const isConnected = status.sessions && status.sessions.length > 0;
     const isServerRunning = status.running;

@@ -549,23 +549,22 @@ UnityMCP-Public/
 
 ## ⚠️ Important Notes
 
-### Unity Editor Focus Requirement
+### Unity Editor Focus & Connection Stability
 
-**UnityVision requires the Unity Editor window to be visible/focused for optimal performance.**
+UnityVision includes several mechanisms to ensure reliable command execution, even when the Unity Editor is not focused:
 
-This is a Unity engine limitation, not a bug in UnityVision. Here's why:
-
-- **Root Cause**: Unity throttles `EditorApplication.update` callbacks when the editor is unfocused
-  - **Focused**: ~60 updates/second (normal performance)
-  - **Unfocused**: ~1-5 updates/second (severely degraded)
-- **Impact**: MCP commands queue and execute slowly when Unity is in the background
-- **Detection**: UnityVision will warn you in the Unity Console when this happens
+- **`QueuePlayerLoopUpdate()`** (Unity 2021.2+) — Forces the editor's update loop to tick even when unfocused. This is the primary mechanism for responsive command processing.
+- **Auto-Focus** — When commands have been waiting >2 seconds, UnityVision automatically brings Unity to the foreground. This is configurable (enabled by default).
+- **Heartbeat Health Checking** — The server periodically checks that Unity is alive via ping/pong. Dead connections are detected within 30 seconds and cleaned up immediately.
+- **Circuit Breaker** — After 3 consecutive command timeouts, the server pauses new commands for 10 seconds to let Unity recover, preventing cascading failures.
+- **Stale Command Reaper** — Commands stuck in the queue >30 seconds are automatically expired with a clear error instead of hanging forever.
+- **Session Migration** — When Unity reconnects after assembly reload or play mode, pending server-side requests resolve immediately instead of waiting.
 
 **Best Practices:**
-1. ✅ **Keep Unity visible** - Arrange windows side-by-side with your AI assistant
-2. ✅ **Monitor Unity Console** - Watch for unfocused warnings
-3. ✅ **Wait for compilation** - Don't run MCP commands while Unity is compiling
-4. ⚠️ **30-second timeout** - Commands that don't execute within 30 seconds will fail with a clear error message
+1. ✅ **Keep Unity visible** — Arrange windows side-by-side with your AI assistant for best performance
+2. ✅ **Wait for compilation** — Don't run MCP commands while Unity is compiling
+3. ✅ **Auto-Focus is ON by default** — Unity will come to the foreground when commands are pending. Toggle in `Window > UnityVision > Bridge Status`
+4. ⚠️ **30-second timeout** — Commands that don't execute within 30 seconds will fail with a clear error message
 
 **Example Window Arrangement:**
 ```
@@ -577,6 +576,8 @@ This is a Unity engine limitation, not a bug in UnityVision. Here's why:
 │   Chat          │   Game View     │
 └─────────────────┴─────────────────┘
 ```
+
+> **Note:** The auto-focus feature may briefly steal window focus when commands are pending. If this is disruptive, disable it via `WebSocketClient.AutoFocusEnabled = false` or through the Bridge Status window.
 
 ### Compilation and Performance
 
@@ -620,6 +621,31 @@ If you need a specific port (e.g., for firewall rules):
 
 1. Set `UNITY_VISION_PORT` environment variable before starting Unity
 2. Or the MCP server will auto-discover whatever port Unity chose
+
+---
+
+## 📋 Changelog
+
+### v1.2.0 — Connection Stability Overhaul
+
+**Unity Client (C# Bridge):**
+- **`QueuePlayerLoopUpdate()`** — Uses the official Unity API (2021.2+) to force editor update ticks even when unfocused. This is the single biggest stability improvement.
+- **Auto-Focus** — Automatically brings Unity to the foreground when commands have been waiting >2s. Configurable via `WebSocketClient.AutoFocusEnabled`.
+- **Stale Command Reaper** — Commands stuck in the Unity-side queue for >30s are automatically expired with error responses instead of hanging forever.
+- **Thread-safe connection state** — `_isConnected` and `_isConnecting` are now `volatile` to prevent CPU cache staleness across threads.
+
+**MCP Server (Node.js):**
+- **Ping/Pong health checking** — Server now properly handles `ping` messages from Unity (previously dropped as "Unknown message type") and responds with `pong`.
+- **Heartbeat dead session detection** — Server periodically checks all sessions and closes any that haven't sent a ping within 30 seconds.
+- **Immediate command rejection on disconnect** — Pending commands for a disconnected session are now rejected immediately instead of waiting 30s to timeout.
+- **Circuit breaker** — After 3 consecutive command timeouts, new commands fast-fail for 10 seconds to prevent cascading hangs. Auto-resets on next success.
+- **Session migration** — When Unity reconnects after assembly reload, pending `resolveSession` waiters resolve immediately instead of polling.
+- **Increased reconnect grace period** — Changed from 10s to 45s to accommodate large project assembly reloads.
+
+### v1.1.0 — Phase 50
+
+- Compilation status tracking, detailed console logs, text edits with SHA preconditions
+- Auto-create hierarchy, safe tag assignment, atomic file writes, path traversal protection
 
 ---
 
@@ -667,7 +693,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **Built with ❤️ for the Unity + AI community**
 
-*Status as of December 8, 2025*
+*Status as of February 14, 2026 — v1.2.0*
 
 [⬆ Back to top](#-unityvision-mcp)
 

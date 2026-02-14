@@ -29,6 +29,7 @@ namespace UnityVision.Editor.Bridge
             Register("get_editor_state", EditorHandlers.GetEditorState);
             Register("set_play_mode", EditorHandlers.SetPlayMode);
             Register("get_active_context", EditorHandlers.GetActiveContext);
+            Register("get_transport_diagnostics", EditorHandlers.GetTransportDiagnostics);
 
             // Console handlers
             Register("get_console_logs", ConsoleHandlers.GetConsoleLogs);

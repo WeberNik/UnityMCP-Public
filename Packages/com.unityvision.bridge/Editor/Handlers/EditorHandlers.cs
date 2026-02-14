@@ -13,6 +13,7 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityVision.Editor.Bridge;
+using UnityVision.Editor.Transport;
 
 namespace UnityVision.Editor.Handlers
 {
@@ -233,6 +234,18 @@ namespace UnityVision.Editor.Handlers
             response.recentErrors = ConsoleHandlers.GetRecentErrors(req.maxConsoleErrors);
 
             return RpcResponse.Success(response);
+        }
+
+        public static RpcResponse GetTransportDiagnostics(RpcRequest request)
+        {
+            try
+            {
+                return RpcResponse.Success(WebSocketClient.GetTransportDiagnostics());
+            }
+            catch (Exception ex)
+            {
+                return RpcResponse.Failure("DIAGNOSTICS_ERROR", ex.Message);
+            }
         }
 
         // ====================================================================

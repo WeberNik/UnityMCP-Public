@@ -20,6 +20,7 @@ namespace UnityVision.Editor.Transport
     /// Centralized command execution pipeline.
     /// Guarantees commands are executed on Unity's main thread without blocking.
     /// </summary>
+    [Obsolete("CommandDispatcher is deprecated. Use WebSocketClient's internal command queue and transport pipeline instead.")]
     public static class CommandDispatcher
     {
         // ============================================================================

@@ -1,6 +1,6 @@
 {
   "name": "com.unityvision.bridge",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "displayName": "UnityVision Bridge",
   "description": "MCP bridge for AI-assisted Unity development with Windsurf",
   "unity": "2021.3",
